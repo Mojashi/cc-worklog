@@ -6,19 +6,41 @@ Claude Code の稼働時間 / タイムラインを分析するツール（**依
 
 データは外部に一切送信されない（HTML も CDN 不使用の自己完結）。
 
+## スクリーンショット
+
+> 以下はデモ用の合成データ（`bun run scripts/gen-demo.ts`）で生成したもの。実データは含まれません。
+
+ダッシュボード:
+
+![dashboard](docs/dashboard.png)
+
+並行作業タイムライン（スイムレーン）:
+
+![timeline](docs/timeline.png)
+
 ## インストール
 
-### リリースバイナリ（推奨）
-[Releases](https://github.com/Mojashi/cc-worklog/releases) から自分の OS/アーキ向けを落として実行権限を付けるだけ。
+### ワンライナー（macOS / Linux・推奨）
+OS/アーキを自動判定して最新リリースバイナリを取得する:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Mojashi/cc-worklog/main/install.sh | sh
+```
+
+インストール先は `~/.local/bin`（無ければ `/usr/local/bin`）。`CCW_INSTALL_DIR=/path sh` で変更可。
+
+### 手動ダウンロード
+[Releases](https://github.com/Mojashi/cc-worklog/releases) から該当アセットを取得して実行権限を付ける:
 
 ```sh
 # 例: macOS (Apple Silicon)
 curl -fsSL -o cc-worklog https://github.com/Mojashi/cc-worklog/releases/latest/download/cc-worklog-darwin-arm64
-chmod +x cc-worklog
-./cc-worklog --open
+chmod +x cc-worklog && ./cc-worklog --open
 ```
 
 配布アセット: `cc-worklog-{darwin,linux}-{x64,arm64}` / `cc-worklog-windows-x64.exe`（+ `SHA256SUMS.txt`）
+
+Windows は Releases から `cc-worklog-windows-x64.exe` を取得してください。
 
 ### ソースからビルド（要 [Bun](https://bun.sh)）
 ```sh

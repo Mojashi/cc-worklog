@@ -20,7 +20,7 @@ const CACHE_VERSION = 4;
 const MIN_EPOCH_MS = 1700000000000; // 2023-11 頃
 const MAX_EPOCH_SLACK_MS = 2 * 86400 * 1000;
 
-type FileData = {
+export type FileData = {
   project: string | null;
   events: [number, boolean][]; // [epochMs, isHumanPrompt]
   nAssistant: number;
@@ -222,7 +222,7 @@ const dayKey = (ms: number) => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 };
 
-function analyze(results: Map<string, FileData>, gapMin: number, floorMin: number, ignore: Set<string>) {
+export function analyze(results: Map<string, FileData>, gapMin: number, floorMin: number, ignore: Set<string>) {
   const gap = gapMin * 60_000;
   const floor = floorMin * 60_000;
 
@@ -486,10 +486,10 @@ function round(x: number, n: number): number {
 function injectAll(tpl: string, token: string, value: string): string {
   return tpl.split(token).join(value);
 }
-function renderHtml(m: any): string {
+export function renderHtml(m: any): string {
   return injectAll(dashboardTpl, "/*__DATA__*/", JSON.stringify(m));
 }
-function renderTimeline(m: any): string {
+export function renderTimeline(m: any): string {
   const meta = { generatedAt: m.generatedAt, tz: m.tz, gapMin: m.gapMin };
   let s = injectAll(timelineTpl, "/*__DATA__*/", JSON.stringify(m.timeline));
   s = injectAll(s, "/*__META__*/", JSON.stringify(meta));
@@ -571,4 +571,4 @@ async function main() {
   }
 }
 
-main();
+if (import.meta.main) main();
