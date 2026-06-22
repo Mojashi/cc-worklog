@@ -1,0 +1,8 @@
+# 集計から除外するプロジェクト(リポジトリ)名を1行ずつ書く。
+# このファイルを ctlignore.txt にコピーして使う:  cp ctlignore.txt.example ctlignore.txt
+# 名前は git ロールアップ後のリポジトリ名(= dashboard のプロジェクト名)と一致させる。
+# 行頭 # はコメント。--ignore name1,name2 でも追加指定できる。
+#
+# 例:
+# my-noisy-bot
+# scratch

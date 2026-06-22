@@ -1,0 +1,9 @@
+# 生成物(個人データを含むため公開しない)
+dashboard.html
+timeline.html
+metrics.json
+# 個人の除外設定(.example を雛形として使う)
+ctlignore.txt
+# Python
+__pycache__/
+*.pyc
