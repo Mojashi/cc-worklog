@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>並行作業タイムライン — Claude Code</title>
+<style>
+:root{--bg:#0d1117;--panel:#161b22;--border:#30363d;--fg:#e6edf3;--muted:#8b949e;--accent:#d97757}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);overflow:hidden;
+  font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Segoe UI",sans-serif}
+.top{display:flex;align-items:center;gap:14px;padding:10px 16px;border-bottom:1px solid var(--border);flex-wrap:wrap;height:53px}
+.top h1{font-size:15px;margin:0;font-weight:700}
+.top a{color:var(--accent);font-size:12px;text-decoration:none}
+.top .hint{font-size:12px;color:var(--muted)}
+.ctrl{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap}
+button{background:var(--panel);color:var(--fg);border:1px solid var(--border);border-radius:7px;
+  padding:6px 12px;font-size:13px;cursor:pointer}
+button:hover{border-color:var(--accent)}
+#grid{position:absolute;left:0;right:0;top:53px;bottom:64px}
+#minimap{position:absolute;left:0;right:0;bottom:0;height:64px;border-top:1px solid var(--border);
+  background:var(--panel);padding:8px 12px 4px}
+#mmtrack{position:relative;height:34px;background:#0d1117;border:1px solid var(--border);
+  border-radius:5px;overflow:hidden;cursor:pointer}
+#mmdens{position:absolute;inset:0}
+#mmview{position:absolute;top:-1px;bottom:-1px;background:rgba(255,255,255,.10);
+  border:2px solid #fff;border-radius:3px;pointer-events:none;min-width:3px;
+  box-shadow:0 0 0 1px #000,0 0 8px rgba(255,255,255,.4)}
+.mmlabel{position:absolute;top:38px;font-size:10px;color:var(--muted);transform:translateX(-50%)}
+#side{position:absolute;left:0;top:0;bottom:0;width:var(--lw);background:var(--panel);
+  border-right:1px solid var(--border);overflow:hidden;z-index:3}
+#sidecover{position:absolute;left:0;top:0;right:0;height:var(--axis);background:var(--panel);
+  border-bottom:1px solid var(--border);z-index:2;display:flex;align-items:center;padding:0 12px;
+  font-size:11px;color:var(--muted);font-weight:600}
+#sideinner{position:absolute;left:0;top:0;right:0}
+.srow{position:absolute;left:0;right:0;height:var(--rh);display:flex;flex-direction:column;
+  justify-content:center;padding:0 12px;border-bottom:1px solid #1b2129;
+  transition:top .35s cubic-bezier(.22,1,.36,1),opacity .3s,transform .35s}
+.srow b{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.srow span{font-size:10px;color:var(--muted)}
+.srow .sw{width:6px;height:6px;border-radius:2px;display:inline-block;margin-right:5px;vertical-align:middle}
+#tl{position:absolute;left:var(--lw);right:0;top:0;bottom:0;overflow:auto}
+#canvas{position:relative}
+.axis{position:sticky;top:0;height:var(--axis);z-index:5;background:#0d1117ee;backdrop-filter:blur(3px);
+  border-bottom:1px solid var(--border)}
+.alabel{position:absolute;top:7px;font-size:11px;color:#c9d4e0;white-space:nowrap;padding-left:5px;
+  border-left:1px solid #3a424c;height:18px;line-height:18px}
+.alabel.mon{color:#fff;font-weight:700;border-left-color:#5a6573}
+.alabel.hour{color:#7f8b98;font-size:10px;border-left-color:#262c34}
+.grid{position:absolute;top:var(--axis);bottom:0;border-left:1px solid #161c23}
+.grid.mon{border-left:1px solid #2a323b}
+.grid.hour{border-left-color:#10151b}
+.lane{position:absolute;left:0;height:var(--rh);
+  transition:top .35s cubic-bezier(.22,1,.36,1),opacity .3s,transform .35s}
+.lane.hidden,.srow.hidden{opacity:0;transform:translateY(12px);pointer-events:none}
+.bar{position:absolute;border-radius:4px;top:3px;height:calc(var(--rh) - 7px)}
+.bar:hover{outline:1.5px solid #fff;z-index:4}
+#tip{position:fixed;pointer-events:none;background:#000;border:1px solid var(--border);
+  padding:6px 9px;border-radius:6px;font-size:12px;opacity:0;transition:opacity .1s;z-index:30;white-space:nowrap}
+.range{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--fg);
+  background:#0d1117;border:1px solid var(--border);border-radius:6px;padding:4px 10px;white-space:nowrap}
+#cursor{position:absolute;top:0;bottom:0;width:1px;background:rgba(255,255,255,.45);
+  z-index:6;pointer-events:none;display:none}
+#curlabel{position:sticky;top:6px;transform:translateX(-50%);background:var(--accent);color:#fff;
+  font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;padding:2px 6px;border-radius:4px;
+  white-space:nowrap;z-index:8}
+</style>
+</head>
+<body>
+<div class="top">
+  <h1>並行作業タイムライン</h1>
+  <a href="dashboard.html">← ダッシュボードへ</a>
+  <span class="range" id="range"></span>
+  <span class="hint" id="sub"></span>
+  <div class="ctrl">
+    <span class="hint" id="vis"></span>
+    <span class="hint">|</span>
+    <span class="hint">ズーム</span>
+    <button id="zout">－</button><button id="zin">＋</button>
+    <button id="jstart">最初へ</button>
+    <button id="jend">最新へ</button>
+  </div>
+</div>
+<div id="grid">
+  <div id="side"><div id="sidecover">案件 / プロジェクト</div><div id="sideinner"></div></div>
+  <div id="tl"><div id="canvas"><div class="axis" id="axis"></div><div id="lanes"></div><div id="cursor"><div id="curlabel"></div></div></div></div>
+</div>
+<div id="minimap"><div id="mmtrack"><div id="mmdens"></div><div id="mmview"></div></div></div>
+<div id="tip"></div>
+<script>
+const DATA=/*__DATA__*/, META=/*__META__*/;
+const HOUR=3600000, DAY=86400000;
+const T0=DATA.start, T1=DATA.end, SPAN=Math.max(T1-T0,HOUR);
+const LW=190, AXIS=32, ROWH=30;
+const r=document.documentElement.style;
+r.setProperty('--lw',LW+'px'); r.setProperty('--axis',AXIS+'px'); r.setProperty('--rh',ROWH+'px');
+const tl=document.getElementById('tl'), canvas=document.getElementById('canvas'),
+      axis=document.getElementById('axis'), lanesEl=document.getElementById('lanes'),
+      side=document.getElementById('side'), sideinner=document.getElementById('sideinner'),
+      tip=document.getElementById('tip');
+let pxh=10; // px / hour
+
+document.getElementById('sub').textContent=
+  `${DATA.lanes.length}プロジェクト / ${DATA.segments.length}セッション ・ tz=${META.tz} ・ gap=${META.gapMin}分`;
+
+const color=p=>`hsl(${(p*53)%360} 60% 60%)`;
+const pad=n=>String(n).padStart(2,'0');
+const fmtDT=ms=>{const d=new Date(ms);
+  return `${d.getMonth()+1}/${pad(d.getDate())}(${'日月火水木金土'[d.getDay()]}) ${pad(d.getHours())}:${pad(d.getMinutes())}`;};
+const fmtDate=ms=>{const d=new Date(ms);
+  return `${d.getFullYear()}/${pad(d.getMonth()+1)}/${pad(d.getDate())}(${'日月火水木金土'[d.getDay()]})`;};
+const fmtDur=ms=>{const m=Math.round(ms/60000);return m>=60?(m/60).toFixed(1)+'h':m+'m';};
+const X=ms=>(ms-T0)/HOUR*pxh;
+
+// プロジェクト別にセグメントをまとめる(開始順)
+const NP=DATA.lanes.length;
+const perPid=Array.from({length:NP},()=>[]);
+DATA.segments.forEach(s=>perPid[s.p].push(s));
+perPid.forEach(a=>a.sort((x,y)=>x.s-y.s));
+
+// レーン(案件ごと) と サイドバー行を一度だけ生成
+const laneEl=[], srowEl=[];
+const lanesFrag=document.createDocumentFragment(), sideFrag=document.createDocumentFragment();
+for(let p=0;p<NP;p++){
+  const lane=document.createElement('div'); lane.className='lane hidden';
+  for(const s of perPid[p]){
+    const b=document.createElement('div'); b.className='bar';
+    b.style.background=color(p); b._s=s; lane.appendChild(b);
+    b.addEventListener('mousemove',e=>{
+      tip.innerHTML=`<b>${DATA.lanes[p].name}</b><br>${fmtDT(s.s)} → ${fmtDT(s.e)}<br>稼働 ${fmtDur(s.e-s.s)} ・ ${s.n} prompts`;
+      tip.style.opacity=1;tip.style.left=(e.clientX+12)+'px';tip.style.top=(e.clientY+12)+'px';});
+    b.addEventListener('mouseleave',()=>tip.style.opacity=0);
+  }
+  lanesFrag.appendChild(lane); laneEl.push(lane);
+  const sr=document.createElement('div'); sr.className='srow hidden';
+  sr.innerHTML=`<b><span class="sw" style="background:${color(p)}"></span>${DATA.lanes[p].name}</b><span>${DATA.lanes[p].active}h 累計</span>`;
+  sideFrag.appendChild(sr); srowEl.push(sr);
+}
+lanesEl.appendChild(lanesFrag); sideinner.appendChild(sideFrag);
+
+function placeBars(){       // ズーム時にバーの左/幅を再計算
+  canvas.style.width=(X(T1)+40)+'px';
+  axis.style.width=canvas.style.width;
+  for(let p=0;p<NP;p++){
+    const bars=laneEl[p].children;
+    let i=0; for(const s of perPid[p]){ const b=bars[i++];
+      b.style.left=X(s.s)+'px';
+      b.style.width=Math.max(X(s.e)-X(s.s),2)+'px';
+      b.style.opacity=0.5+Math.min(s.n,30)/30*0.5;
+    }
+  }
+  buildAxis();
+}
+function buildAxis(){
+  // 日付ラベルは(不透明な)軸バーの中に入れて常に見えるようにする。グリッド線は本体側。
+  axis.querySelectorAll('.alabel').forEach(n=>n.remove());
+  canvas.querySelectorAll('.grid').forEach(n=>n.remove());
+  const pxDay=pxh*24;
+  const dayEvery= pxDay>=80?1 : pxDay>=44?2 : pxDay>=20?7 : 14;
+  let hourEvery=0;                       // ズーム時は時刻も表示
+  if(pxh>=42) hourEvery=3; else if(pxh>=20) hourEvery=6; else if(pxh>=10) hourEvery=12;
+  let d=new Date(T0); d.setHours(0,0,0,0);
+  const aFrag=document.createDocumentFragment(), gFrag=document.createDocumentFragment();
+  let dayIdx=0;
+  for(let t=d.getTime(); t<=T1; t+=DAY, dayIdx++){
+    const dt=new Date(t), px=X(t), first=dt.getDate()===1;
+    if(first || dayIdx%dayEvery===0){
+      const lab=document.createElement('div'); lab.className='alabel'+(first?' mon':'');
+      lab.style.left=px+'px';
+      lab.textContent= first ? `${dt.getFullYear()===new Date(T0).getFullYear()?'':dt.getFullYear()+'/'}${dt.getMonth()+1}月`
+                             : `${dt.getMonth()+1}/${dt.getDate()}(${'日月火水木金土'[dt.getDay()]})`;
+      aFrag.appendChild(lab);
+    }
+    const g=document.createElement('div'); g.className='grid'+(first?' mon':''); g.style.left=px+'px'; gFrag.appendChild(g);
+    if(hourEvery){ for(let h=hourEvery; h<24; h+=hourEvery){
+      const ht=t+h*HOUR; if(ht>T1) break; const hx=X(ht);
+      const hl=document.createElement('div'); hl.className='alabel hour'; hl.style.left=hx+'px'; hl.textContent=pad(h); aFrag.appendChild(hl);
+      const hg=document.createElement('div'); hg.className='grid hour'; hg.style.left=hx+'px'; gFrag.appendChild(hg);
+    }}
+  }
+  axis.appendChild(aFrag); canvas.appendChild(gFrag);
+  axis.style.width=canvas.style.width;
+}
+
+// 可視範囲にセッションがある案件だけ、上から詰めて行を出す
+function hasInView(arr,vs,ve){ for(const s of arr){ if(s.s>ve) break; if(s.e>=vs) return true; } return false; }
+let _tick=false;
+function updateView(){
+  _tick=false;
+  const sl=tl.scrollLeft, vw=tl.clientWidth;
+  const vs=T0+sl/pxh*HOUR, ve=T0+(sl+vw)/pxh*HOUR;
+  let idx=0;
+  for(let p=0;p<NP;p++){
+    if(perPid[p].length && hasInView(perPid[p],vs,ve)){
+      const top=AXIS+idx*ROWH;
+      const lane=laneEl[p], sr=srowEl[p];
+      lane.style.top=top+'px'; lane.classList.remove('hidden');
+      sr.style.top=top+'px'; sr.classList.remove('hidden');
+      idx++;
+    }else{
+      laneEl[p].classList.add('hidden'); srowEl[p].classList.add('hidden');
+    }
+  }
+  const h=AXIS+idx*ROWH+8;
+  canvas.style.height=Math.max(h, tl.clientHeight)+'px';
+  sideinner.style.height=h+'px';
+  document.getElementById('vis').textContent=`画面内 ${idx} 案件`;
+  const vt0=T0+sl/pxh*HOUR, vt1=T0+(sl+vw)/pxh*HOUR;
+  document.getElementById('range').textContent=`${fmtDate(vt0)} 〜 ${fmtDate(vt1)}`;
+  mmUpdate();
+}
+
+// 縦スクロールはサイドバーを同期 / 横スクロールは表示行を更新
+tl.addEventListener('scroll',()=>{
+  sideinner.style.transform=`translateY(${-tl.scrollTop}px)`;
+  if(!_tick){ _tick=true; requestAnimationFrame(updateView); }
+});
+function zoom(f){
+  const mid=tl.scrollLeft+tl.clientWidth/2, tMid=T0+mid/pxh*HOUR;
+  pxh=Math.min(160,Math.max(0.4,pxh*f));
+  placeBars(); updateView();
+  tl.scrollLeft=X(tMid)-tl.clientWidth/2;
+}
+document.getElementById('zin').onclick=()=>zoom(1.6);
+document.getElementById('zout').onclick=()=>zoom(1/1.6);
+document.getElementById('jstart').onclick=()=>tl.scrollLeft=0;
+document.getElementById('jend').onclick=()=>tl.scrollLeft=canvas.scrollWidth;
+// Ctrl/⌘+ホイールのみズーム。通常スクロールはブラウザ任せ(縦=縦/横=横、奪わない)
+tl.addEventListener('wheel',e=>{
+  if(e.ctrlKey||e.metaKey){ e.preventDefault(); zoom(e.deltaY<0?1.12:1/1.12); }
+},{passive:false});
+
+// マウス位置に縦カーソル線＋日時ラベルを表示(今どの時間か常に分かるように)
+const cursor=document.getElementById('cursor'), curlabel=document.getElementById('curlabel');
+tl.addEventListener('mousemove',e=>{
+  const cx=tl.scrollLeft+(e.clientX-tl.getBoundingClientRect().left);
+  cursor.style.left=cx+'px'; cursor.style.display='block';
+  curlabel.textContent=fmtDT(T0+cx/pxh*HOUR);
+});
+tl.addEventListener('mouseleave',()=>{ cursor.style.display='none'; });
+
+// ---- ミニマップ(全期間の密度＋現在位置。クリック/ドラッグで一気にジャンプ) ----
+const mmtrack=document.getElementById('mmtrack'), mmdens=document.getElementById('mmdens'),
+      mmview=document.getElementById('mmview'), minimap=document.getElementById('minimap');
+function buildMinimap(){
+  const W=Math.max(150,Math.floor(mmtrack.clientWidth||800));
+  const N=Math.min(900,W);
+  const counts=new Array(N).fill(0); let mx=1;
+  for(const s of DATA.segments){
+    let i0=Math.max(0,Math.floor((s.s-T0)/SPAN*N)), i1=Math.min(N-1,Math.floor((s.e-T0)/SPAN*N));
+    for(let i=i0;i<=i1;i++){ if(++counts[i]>mx)mx=counts[i]; }
+  }
+  let h=''; for(let i=0;i<N;i++){ if(!counts[i])continue; const op=(0.2+0.8*counts[i]/mx).toFixed(2);
+    h+=`<div style="position:absolute;left:${(i/N*100).toFixed(3)}%;width:${(100/N+0.3).toFixed(3)}%;top:0;bottom:0;background:rgba(217,119,87,${op})"></div>`; }
+  mmdens.innerHTML=h;
+  minimap.querySelectorAll('.mmlabel').forEach(n=>n.remove());
+  let d=new Date(T0); d.setDate(1); d.setHours(0,0,0,0);
+  for(let t=d.getTime();t<=T1;){ const dt=new Date(t), px=(t-T0)/SPAN*100;
+    if(px>=0&&px<=100){ const lab=document.createElement('div'); lab.className='mmlabel';
+      lab.style.left='calc(12px + '+px+'% - '+(px/100*24)+'px)'; lab.textContent=(dt.getMonth()+1)+'月';
+      minimap.appendChild(lab); }
+    dt.setMonth(dt.getMonth()+1); t=dt.getTime(); }
+}
+function mmUpdate(){
+  const W=mmtrack.clientWidth;
+  const viewT0=T0+tl.scrollLeft/pxh*HOUR, viewSpan=tl.clientWidth/pxh*HOUR;
+  mmview.style.left=((viewT0-T0)/SPAN*W)+'px';
+  mmview.style.width=Math.max(3,Math.min(W,viewSpan/SPAN*W))+'px';
+}
+function mmSeek(e){
+  const r=mmtrack.getBoundingClientRect();
+  const frac=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width));
+  tl.scrollLeft=X(T0+frac*SPAN)-tl.clientWidth/2;  // クリック位置を中央に
+}
+mmtrack.addEventListener('click',mmSeek);
+let mmDrag=false;
+mmtrack.addEventListener('mousedown',e=>{mmDrag=true;mmSeek(e);e.preventDefault();});
+window.addEventListener('mousemove',e=>{ if(mmDrag)mmSeek(e); });
+window.addEventListener('mouseup',()=>mmDrag=false);
+window.addEventListener('resize',()=>{ buildMinimap(); placeBars(); updateView(); });
+
+placeBars();
+buildMinimap();
+tl.scrollLeft=canvas.scrollWidth; // 最新側から表示
+updateView();
+</script>
+</body>
+</html>

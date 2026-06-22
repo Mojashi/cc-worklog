@@ -1,0 +1,16 @@
+{
+  "name": "cc-worklog",
+  "version": "0.1.0",
+  "description": "Claude Code の稼働時間 / タイムライン分析ツール（依存ゼロ・完全ローカル・Bun単一バイナリ）",
+  "type": "module",
+  "module": "src/index.ts",
+  "bin": { "cc-worklog": "src/index.ts" },
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "build": "bun build src/index.ts --compile --minify --outfile dist/cc-worklog",
+    "build:all": "bun run scripts/build-all.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

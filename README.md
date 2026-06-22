@@ -1,29 +1,52 @@
 # cc-worklog
 
-Claude Code の稼働時間 / タイムラインを分析する単一スクリプトのツール（依存ゼロ・完全ローカル）。
-`~/.claude/projects/*/*.jsonl` のセッションログを読み、**アクティブ時間**（実際に手を動かしていた時間）を
-ギャップベースで推定して、依存ゼロ・完全ローカルの **HTMLダッシュボード** を生成する。
+Claude Code の稼働時間 / タイムラインを分析するツール（**依存ゼロ・完全ローカル・Bun 単一バイナリ**）。
+`~/.claude/projects/**/*.jsonl` のセッションログを読み、**アクティブ時間**（実際に手を動かしていた時間）を
+ギャップベースで推定して、自己完結の **HTML ダッシュボード** と **並行作業タイムライン** を生成する。
+
+データは外部に一切送信されない（HTML も CDN 不使用の自己完結）。
+
+## インストール
+
+### リリースバイナリ（推奨）
+[Releases](https://github.com/Mojashi/cc-worklog/releases) から自分の OS/アーキ向けを落として実行権限を付けるだけ。
+
+```sh
+# 例: macOS (Apple Silicon)
+curl -fsSL -o cc-worklog https://github.com/Mojashi/cc-worklog/releases/latest/download/cc-worklog-darwin-arm64
+chmod +x cc-worklog
+./cc-worklog --open
+```
+
+配布アセット: `cc-worklog-{darwin,linux}-{x64,arm64}` / `cc-worklog-windows-x64.exe`（+ `SHA256SUMS.txt`）
+
+### ソースからビルド（要 [Bun](https://bun.sh)）
+```sh
+bun install            # 型定義のみ(devDependency)。実行・ビルドには不要
+bun run start          # そのまま実行
+bun run build          # dist/cc-worklog を単一バイナリにコンパイル
+bun run build:all      # 全OS/アーキ向けにクロスコンパイル
+```
 
 ## 使い方
 
-```bash
-python3 ctl.py            # 全期間を解析して dashboard.html を生成 + サマリを表示
-python3 ctl.py --open     # 生成後にブラウザで開く
-python3 ctl.py --json metrics.json   # 集計結果をJSONでも出力
+```sh
+cc-worklog                 # 解析して dashboard.html + timeline.html を生成 + サマリ表示
+cc-worklog --open          # 生成後にブラウザで開く
+cc-worklog --json out.json # 集計結果を JSON でも出力
 ```
 
-初回は全 jsonl をパースする（数万ファイルでも ~10秒）。結果は `~/.cache/claude-tl/` に
-ファイル単位でキャッシュされ、2回目以降は変更があったファイルだけ再パースする。
-
-### オプション
+初回は全 jsonl をパースする（数万ファイルでも ~20 秒）。結果は `~/.cache/cc-worklog/` に
+ファイル単位でキャッシュされ、2 回目以降は変更があったファイルだけ再パースする。
 
 | フラグ | 既定 | 説明 |
 |---|---|---|
 | `--gap N` | 15 | 無操作 N 分以上で作業ブロックを区切る |
 | `--floor N` | 2 | 各作業ブロック先頭に N 分の下駄を履かせる（単発プロンプト・思考時間の補正） |
-| `--out PATH` | dashboard.html | 出力HTMLパス |
-| `--json PATH` | - | 集計JSONも書き出す |
+| `--out PATH` | dashboard.html | 出力 HTML パス（timeline.html は同じディレクトリに出る） |
+| `--json PATH` | - | 集計 JSON も書き出す |
 | `--open` | - | 生成後にブラウザで開く |
+| `--ignore a,b` | - | 除外プロジェクト（カンマ区切り・複数可）。`ctlignore.txt` にも書ける |
 | `--rebuild` | - | キャッシュを無視して全ファイル再パース |
 | `--no-cache` | - | キャッシュを使わない |
 
@@ -44,17 +67,11 @@ git リポジトリが見つからない場合は cwd のディレクトリ名�
 
 ## プロジェクトの除外
 
-集計から外したいプロジェクトは、`ctlignore.txt.example` を `ctlignore.txt` にコピーして
-1行1リポジトリ名で書く（`#` でコメント可）。`--ignore name1,name2` でも追加できる。
-名前は git ロールアップ後のリポジトリ名（= ダッシュボードのプロジェクト名）と一致させる。
+集計から外したいプロジェクトは、`ctlignore.txt.example` を `ctlignore.txt`（カレントディレクトリ）に
+コピーして 1 行 1 リポジトリ名で書く（`#` でコメント可）。`--ignore name1,name2` でも追加できる。
 
-```
+```sh
 cp ctlignore.txt.example ctlignore.txt
-```
-```
-# ctlignore.txt
-my-noisy-bot
-scratch
 ```
 
 除外プロジェクトのイベントは**タイムライン上のアンカーとしては残る**が、稼働時間としては
@@ -64,7 +81,7 @@ scratch
 ## ダッシュボードの内容
 
 - サマリカード（総アクティブ時間 / 平均 / プロンプト数 / 作業ブロック / 最も活発な時間帯）
-- 稼働カレンダー（GitHub風ヒートマップ、日別アクティブ時間）
+- 稼働カレンダー（GitHub 風ヒートマップ、日別アクティブ時間）
 - 日別アクティブ時間の棒グラフ（直近90日）
 - 生活リズム（曜日 × 時間帯のヒートマップ）
 - プロジェクト別アクティブ時間
@@ -72,17 +89,24 @@ scratch
 
 ## 並行作業タイムライン（timeline.html）
 
-`ctl.py` は `dashboard.html` と一緒に `timeline.html` も生成する（ダッシュボード上部のボタンからも開ける）。
-全期間を1枚に並べた**横スクロール式の連続タイムライン**で、並行作業の様子を俯瞰できる。
+全期間を 1 枚に並べた横スクロール式の連続タイムライン。ダッシュボード上部のボタンからも開ける。
 
 - **左サイドバーに案件（プロジェクト）名**（色＋累計時間）。**1行＝1案件**
-- 横軸＝時間（ネイティブの横スクロールバーでドラッグ／スクロール）
 - **表示行は「今見えている時間範囲」に連動**：その範囲にセッションがある案件だけを上から詰めて表示し、
   横スクロールに応じて行が出たり消えたりする（ヘッダに「画面内 N 案件」を表示）
-- 各セッションをバーで表示。色＝案件、幅＝稼働時間、濃さ＝prompt数
 - 軸に**日付（曜日付き）＋時刻ラベルを常時表示**。上部に表示中の日付範囲、マウス位置に日時カーソル線
 - 下部**ミニマップ**：全期間の活動密度＋現在位置。クリック/ドラッグで任意の時期へ一気にジャンプ
-- スクロールはブラウザ標準（トラックパッド／スクロールバーで縦横）、Ctrl/⌘＋ホイール または ＋／－＝ズーム
+- スクロールはブラウザ標準（トラックパッド／スクロールバー）、Ctrl/⌘＋ホイール または ＋／－＝ズーム
 - バーにホバーで案件名・期間・稼働時間・prompt数
 
-データは外部に一切送信されない（HTMLもCDN不使用の自己完結）。
+## リリース
+
+`v*` タグを push すると GitHub Actions（`.github/workflows/release.yml`）が全 OS/アーキ向けに
+クロスコンパイルし、GitHub Release にバイナリと `SHA256SUMS.txt` を添付する。
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+## ライセンス
+MIT

@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Code 稼働時間ダッシュボード</title>
+<style>
+:root{
+  --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#e6edf3; --muted:#8b949e;
+  --accent:#d97757; --accent2:#58a6ff;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Segoe UI",sans-serif;}
+.wrap{max-width:1100px;margin:0 auto;padding:28px 20px 80px}
+h1{font-size:20px;margin:0 0 4px}
+.sub{color:var(--muted);font-size:13px;margin-bottom:24px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:28px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+.card .v{font-size:24px;font-weight:700}
+.card .l{font-size:12px;color:var(--muted);margin-top:2px}
+.card .s{font-size:11px;color:var(--muted);margin-top:6px}
+section{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:18px;margin-bottom:22px}
+section h2{font-size:14px;margin:0 0 14px;color:var(--fg)}
+.legend{font-size:11px;color:var(--muted);display:flex;gap:6px;align-items:center;margin-top:8px}
+.legend i{width:11px;height:11px;border-radius:2px;display:inline-block}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border)}
+th{color:var(--muted);font-weight:600;font-size:12px}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+.bar{height:8px;background:var(--accent);border-radius:3px;display:inline-block;vertical-align:middle}
+.scroll{max-height:420px;overflow:auto}
+svg{display:block;max-width:100%}
+.cell:hover{stroke:#fff;stroke-width:1px}
+.tip{position:fixed;pointer-events:none;background:#000;border:1px solid var(--border);
+  padding:6px 8px;border-radius:6px;font-size:12px;opacity:0;transition:opacity .1s;z-index:10;white-space:nowrap}
+.muted{color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Claude Code 稼働時間ダッシュボード</h1>
+  <div class="sub" id="meta"></div>
+  <a href="timeline.html" style="display:inline-block;margin:0 0 22px;padding:9px 16px;
+    background:var(--accent);color:#fff;border-radius:8px;text-decoration:none;font-size:13px;font-weight:600">
+    ▶ 並行作業タイムライン（スイムレーン）を開く</a>
+  <div class="cards" id="cards"></div>
+
+  <section>
+    <h2>稼働カレンダー（日別アクティブ時間 / GitHub風）</h2>
+    <div id="cal"></div>
+    <div class="legend">少 <i style="background:#161b22;border:1px solid #30363d"></i>
+      <i style="background:#0e4429"></i><i style="background:#006d32"></i>
+      <i style="background:#26a641"></i><i style="background:#39d353"></i> 多</div>
+  </section>
+
+  <section>
+    <h2>日別アクティブ時間（直近90日）</h2>
+    <div id="bars"></div>
+  </section>
+
+  <section>
+    <h2>生活リズム（曜日 × 時間帯のアクティブ時間）</h2>
+    <div id="rhythm"></div>
+  </section>
+
+  <section>
+    <h2>プロジェクト別アクティブ時間</h2>
+    <div class="scroll"><table id="projects"></table></div>
+  </section>
+
+  <section>
+    <h2>直近の作業ブロック</h2>
+    <div class="scroll"><table id="recent"></table></div>
+  </section>
+</div>
+<div class="tip" id="tip"></div>
+<script>
+const DATA = /*__DATA__*/;
+const tip = document.getElementById('tip');
+function showTip(e,html){tip.innerHTML=html;tip.style.opacity=1;
+  tip.style.left=(e.clientX+12)+'px';tip.style.top=(e.clientY+12)+'px';}
+function hideTip(){tip.style.opacity=0;}
+const fmtH = h => h>=1 ? h.toFixed(1)+'h' : Math.round(h*60)+'m';
+
+// meta + cards
+const s=DATA.summary;
+document.getElementById('meta').textContent =
+  `${s.firstDate} 〜 ${s.lastDate}  ・  生成 ${DATA.generatedAt}  ・  tz=${DATA.tz}  ・  gap=${DATA.gapMin}分 / floor=${DATA.floorMin}分`;
+const cards=[
+  ['総アクティブ時間', fmtH(s.activeHours), `${s.daysActive}日稼働`],
+  ['平均 / 稼働日', fmtH(s.avgPerDay), s.maxDay?`最長 ${fmtH(s.maxDay.hours)} (${s.maxDay.date})`:''],
+  ['プロンプト数', s.prompts.toLocaleString(), `応答 ${s.assistantMsgs.toLocaleString()}`],
+  ['作業ブロック', s.blocks.toLocaleString(), `セッション ${s.sessions.toLocaleString()}`],
+  ['最も活発な時間帯', s.busiestHour!=null?`${String(s.busiestHour).padStart(2,'0')}:00台`:'-', ''],
+];
+document.getElementById('cards').innerHTML = cards.map(c=>
+  `<div class="card"><div class="v">${c[1]}</div><div class="l">${c[0]}</div>${c[2]?`<div class="s">${c[2]}</div>`:''}</div>`).join('');
+
+// ---- calendar heatmap ----
+(function(){
+  const daily=DATA.daily; if(!daily.length)return;
+  const map={}; daily.forEach(d=>map[d.date]=d);
+  const last=new Date(daily[daily.length-1].date+'T00:00:00');
+  const start=new Date(last); start.setDate(start.getDate()-371);
+  // 週の頭(日曜)に合わせる
+  start.setDate(start.getDate()-start.getDay());
+  const cell=12, gap=3, top=16, left=28;
+  const weeks=[]; let cur=new Date(start);
+  while(cur<=last){weeks.push(new Date(cur));cur.setDate(cur.getDate()+7);}
+  const W=left+weeks.length*(cell+gap)+10, H=top+7*(cell+gap)+6;
+  const color=h=> h<=0?'#161b22':h<1?'#0e4429':h<2.5?'#006d32':h<4.5?'#26a641':'#39d353';
+  let svg=`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`;
+  const months=['1','2','3','4','5','6','7','8','9','10','11','12'];
+  let lastMonth=-1;
+  weeks.forEach((wd,wi)=>{
+    const m=wd.getMonth();
+    if(m!==lastMonth){lastMonth=m;
+      svg+=`<text x="${left+wi*(cell+gap)}" y="11" fill="#8b949e" font-size="10">${months[m]}月</text>`;}
+    for(let dow=0;dow<7;dow++){
+      const dt=new Date(wd); dt.setDate(dt.getDate()+dow);
+      if(dt>last)continue;
+      const key=dt.toISOString().slice(0,10);
+      const d=map[key]; const h=d?d.active:0;
+      const x=left+wi*(cell+gap), y=top+dow*(cell+gap);
+      const t=d?`${key}: アクティブ ${fmtH(h)} / スパン ${fmtH(d.span)} / ${d.prompts}prompts`:`${key}: なし`;
+      svg+=`<rect class="cell" x="${x}" y="${y}" width="${cell}" height="${cell}" rx="2" fill="${color(h)}"
+        onmousemove="showTip(event,'${t}')" onmouseleave="hideTip()"></rect>`;
+    }
+  });
+  ['月','水','金'].forEach((lab,i)=>{const dow=[1,3,5][i];
+    svg+=`<text x="2" y="${top+dow*(cell+gap)+10}" fill="#8b949e" font-size="9">${lab}</text>`;});
+  svg+='</svg>';
+  document.getElementById('cal').innerHTML=svg;
+})();
+
+// ---- daily bars (last 90) ----
+(function(){
+  const d=DATA.daily.slice(-90); if(!d.length)return;
+  const max=Math.max(...d.map(x=>x.active),1);
+  const bw=Math.max(4,Math.floor(820/d.length)), gap=2, H=160, top=6, left=4;
+  const W=left+d.length*(bw+gap)+30;
+  let svg=`<svg width="${W}" height="${H+24}" viewBox="0 0 ${W} ${H+24}">`;
+  // y軸目盛り
+  [0,Math.ceil(max/2),Math.ceil(max)].forEach(v=>{const y=top+H-(v/max)*H;
+    svg+=`<line x1="${left}" y1="${y}" x2="${W-26}" y2="${y}" stroke="#30363d"/>
+    <text x="${W-22}" y="${y+3}" fill="#8b949e" font-size="9">${v}h</text>`;});
+  d.forEach((x,i)=>{const bh=(x.active/max)*H, px=left+i*(bw+gap), py=top+H-bh;
+    svg+=`<rect x="${px}" y="${py}" width="${bw}" height="${bh}" rx="1" fill="#d97757"
+      onmousemove="showTip(event,'${x.date}: ${fmtH(x.active)} (${x.prompts}prompts, ${x.blocks}ブロック)')" onmouseleave="hideTip()"></rect>`;});
+  svg+='</svg>';
+  document.getElementById('bars').innerHTML=svg;
+})();
+
+// ---- rhythm 7x24 ----
+(function(){
+  const r=DATA.rhythm; const days=['月','火','水','木','金','土','日'];
+  let max=0; r.forEach(row=>row.forEach(v=>{if(v>max)max=v;}));
+  const cell=26, gap=3, top=18, left=28;
+  const W=left+24*(cell+gap)+4, H=top+7*(cell+gap)+4;
+  const color=v=>{if(v<=0||max<=0)return '#161b22'; const t=v/max;
+    const c=Math.round(40+t*180); return `rgb(${217},${Math.round(119-t*40)},${Math.round(87-t*40)},${0.15+t*0.85})`;};
+  let svg=`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`;
+  for(let h=0;h<24;h+=2){svg+=`<text x="${left+h*(cell+gap)}" y="12" fill="#8b949e" font-size="9">${h}</text>`;}
+  for(let w=0;w<7;w++){
+    svg+=`<text x="2" y="${top+w*(cell+gap)+17}" fill="#8b949e" font-size="10">${days[w]}</text>`;
+    for(let h=0;h<24;h++){const v=r[w][h];const x=left+h*(cell+gap),y=top+w*(cell+gap);
+      svg+=`<rect class="cell" x="${x}" y="${y}" width="${cell}" height="${cell}" rx="3" fill="${color(v)}"
+        onmousemove="showTip(event,'${days[w]} ${String(h).padStart(2,'0')}時台: ${fmtH(v)}')" onmouseleave="hideTip()"></rect>`;}
+  }
+  svg+='</svg>';
+  document.getElementById('rhythm').innerHTML=svg;
+})();
+
+// ---- projects table ----
+(function(){
+  const p=DATA.projects; const max=Math.max(...p.map(x=>x.active),1);
+  let h=`<tr><th>プロジェクト</th><th class="num">アクティブ</th><th></th><th class="num">日数</th><th class="num">prompts</th><th class="num">最終</th></tr>`;
+  p.forEach(x=>{const w=Math.round((x.active/max)*160);
+    h+=`<tr><td>${x.name}</td><td class="num">${fmtH(x.active)}</td>
+    <td><span class="bar" style="width:${w}px"></span></td>
+    <td class="num">${x.days}</td><td class="num">${x.prompts}</td><td class="num muted">${x.last}</td></tr>`;});
+  document.getElementById('projects').innerHTML=h;
+})();
+
+// ---- recent blocks ----
+(function(){
+  let h=`<tr><th>開始</th><th>終了</th><th class="num">長さ</th><th>プロジェクト</th><th class="num">prompts</th></tr>`;
+  DATA.recent.forEach(b=>{h+=`<tr><td>${b.start}</td><td class="muted">${b.end}</td>
+    <td class="num">${fmtH(b.dur)}</td><td>${b.project}</td><td class="num">${b.prompts}</td></tr>`;});
+  document.getElementById('recent').innerHTML=h;
+})();
+</script>
+</body>
+</html>

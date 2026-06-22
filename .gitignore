@@ -2,8 +2,13 @@
 dashboard.html
 timeline.html
 metrics.json
+metrics-bun.json
 # 個人の除外設定(.example を雛形として使う)
 ctlignore.txt
-# Python
+# ビルド成果物 / 依存
+dist/
+node_modules/
+*.tsbuildinfo
+# Python(旧実装)
 __pycache__/
 *.pyc
