@@ -66,6 +66,7 @@ svg{display:block;max-width:100%}
 
   <section>
     <h2>プロジェクト別アクティブ時間</h2>
+    <p class="muted">按分時間は作業ブロック内の案件内時間に比例配分（合計＝総アクティブ時間）。案件内時間は並行案件との重複を含む。</p>
     <div class="scroll"><table id="projects"></table></div>
   </section>
 
@@ -175,10 +176,11 @@ document.getElementById('cards').innerHTML = cards.map(c=>
 // ---- projects table ----
 (function(){
   const p=DATA.projects; const max=Math.max(...p.map(x=>x.active),1);
-  let h=`<tr><th>プロジェクト</th><th class="num">アクティブ</th><th></th><th class="num">日数</th><th class="num">prompts</th><th class="num">最終</th></tr>`;
+  let h=`<tr><th>プロジェクト</th><th class="num">按分時間</th><th></th><th class="num">案件内</th><th class="num">重複</th><th class="num">日数</th><th class="num">prompts</th><th class="num">最終</th></tr>`;
   p.forEach(x=>{const w=Math.round((x.active/max)*160);
     h+=`<tr><td>${x.name}</td><td class="num">${fmtH(x.active)}</td>
     <td><span class="bar" style="width:${w}px"></span></td>
+    <td class="num">${fmtH(x.localActive)}</td><td class="num muted">${fmtH(x.sharedActive)}</td>
     <td class="num">${x.days}</td><td class="num">${x.prompts}</td><td class="num muted">${x.last}</td></tr>`;});
   document.getElementById('projects').innerHTML=h;
 })();

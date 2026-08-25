@@ -133,7 +133,8 @@ for(let p=0;p<NP;p++){
   }
   lanesFrag.appendChild(lane); laneEl.push(lane);
   const sr=document.createElement('div'); sr.className='srow hidden';
-  sr.innerHTML=`<b><span class="sw" style="background:${color(p)}"></span>${DATA.lanes[p].name}</b><span>${DATA.lanes[p].active}h 累計</span>`;
+  sr.innerHTML=`<b><span class="sw" style="background:${color(p)}"></span>${DATA.lanes[p].name}</b><span>按分 ${DATA.lanes[p].active}h</span>`;
+  sr.title=`案件内 ${DATA.lanes[p].localActive}h（並行案件との重複を含む）`;
   sideFrag.appendChild(sr); srowEl.push(sr);
 }
 lanesEl.appendChild(lanesFrag); sideinner.appendChild(sideFrag);

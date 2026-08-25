@@ -73,9 +73,7 @@ async function parseFile(path: string): Promise<FileData> {
         const c = d.message?.content;
         if (typeof c === "string") isPrompt = c.trim().length > 0;
         else if (Array.isArray(c))
-          isPrompt = !c.some(
-            (x: any) => x && typeof x === "object" && x.type === "tool_result",
-          );
+          isPrompt = !c.some((x: any) => x && typeof x === "object" && x.type === "tool_result");
       }
       if (isPrompt) nPrompt++;
     }
@@ -102,10 +100,7 @@ async function loadCached(p: string, mtimeMs: number, size: number): Promise<Fil
 
 async function storeCache(p: string, mtimeMs: number, size: number, data: FileData) {
   try {
-    await Bun.write(
-      cachePath(p),
-      JSON.stringify({ v: CACHE_VERSION, mtime: mtimeMs, size, data }),
-    );
+    await Bun.write(cachePath(p), JSON.stringify({ v: CACHE_VERSION, mtime: mtimeMs, size, data }));
   } catch {}
 }
 
@@ -222,9 +217,21 @@ const dayKey = (ms: number) => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 };
 
-export function analyze(results: Map<string, FileData>, gapMin: number, floorMin: number, ignore: Set<string>) {
+export function analyze(
+  results: Map<string, FileData>,
+  gapMin: number,
+  floorMin: number,
+  ignore: Set<string>,
+  month?: string,
+) {
   const gap = gapMin * 60_000;
   const floor = floorMin * 60_000;
+  const inMonth = month
+    ? (ep: number) => {
+        const d = new Date(ep);
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}` === month;
+      }
+    : () => true;
 
   const projNames: string[] = [];
   const projIndex = new Map<string, number>();
@@ -248,7 +255,7 @@ export function analyze(results: Map<string, FileData>, gapMin: number, floorMin
     const name = projectName(data.project, path);
     if (ignore.has(name)) {
       for (const [ep] of data.events)
-        if (ep >= MIN_EPOCH_MS && ep <= maxEpoch) allEvents.push([ep, false, -1]);
+        if (ep >= MIN_EPOCH_MS && ep <= maxEpoch && inMonth(ep)) allEvents.push([ep, false, -1]);
       continue;
     }
     const pid = pidOf(name);
@@ -257,18 +264,23 @@ export function analyze(results: Map<string, FileData>, gapMin: number, floorMin
     totals.prompt += data.nPrompt;
     for (const s of data.sessions) allSessions.add(s);
     for (const [ep, isPrompt] of data.events)
-      if (ep >= MIN_EPOCH_MS && ep <= maxEpoch) allEvents.push([ep, isPrompt, pid]);
+      if (ep >= MIN_EPOCH_MS && ep <= maxEpoch && inMonth(ep)) allEvents.push([ep, isPrompt, pid]);
   }
   allEvents.sort((a, b) => a[0] - b[0]);
 
   const NP = projNames.length;
-  type Day = { active: number; prompts: number; blocks: number; projects: Set<number>; first: number; last: number };
+  type Day = {
+    active: number;
+    prompts: number;
+    blocks: number;
+    projects: Set<number>;
+    first: number;
+    last: number;
+  };
   const daily = new Map<string, Day>();
-  const rhythm: number[][] = Array.from({ length: 7 }, () => new Array(24).fill(0));
-  const projActive = new Array(NP).fill(0);
-  const projDays: Set<string>[] = Array.from({ length: NP }, () => new Set());
-  const projLast = new Array(NP).fill(0);
-  const projPrompts = new Array(NP).fill(0);
+  const rhythm: number[][] = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => 0));
+  const projActive = Array.from({ length: NP }, () => 0);
+  const projPrompts = Array.from({ length: NP }, () => 0);
   const blocks: any[] = [];
 
   const getDay = (ep: number): Day => {
@@ -288,8 +300,6 @@ export function analyze(results: Map<string, FileData>, gapMin: number, floorMin
     const wd = (dt.getDay() + 6) % 7; // Mon=0
     rhythm[wd][dt.getHours()] += secs;
     projActive[pid] += secs;
-    projDays[pid].add(dayKey(ep));
-    if (ep > projLast[pid]) projLast[pid] = ep;
   };
 
   let prevEp: number | null = null;
@@ -337,7 +347,8 @@ export function analyze(results: Map<string, FileData>, gapMin: number, floorMin
   }
   closeBlock();
 
-  // セグメント(プロジェクト別) + 貪欲レーン詰め
+  // プロジェクト別の案件内セグメントを作る。
+  // これは案件ごとに独立して gap 判定するため、並行案件どうしでは重複する。
   const perPid = new Map<number, [number, boolean][]>();
   for (const [ep, isPrompt, pid] of allEvents) {
     if (pid < 0) continue;
@@ -345,30 +356,97 @@ export function analyze(results: Map<string, FileData>, gapMin: number, floorMin
     if (!a) perPid.set(pid, (a = []));
     a.push([ep, isPrompt]);
   }
-  const laneOrder = Array.from({ length: NP }, (_, i) => i)
-    .filter((i) => projActive[i] > 0)
-    .sort((a, b) => projActive[b] - projActive[a]);
-  const laneOf = new Map<number, number>();
-  laneOrder.forEach((pid, idx) => laneOf.set(pid, idx));
+  type RawSegment = { pid: number; s: number; e: number; n: number };
+  const rawSegments: RawSegment[] = [];
+  const segmentsByPid = new Map<number, RawSegment[]>();
+  const projLocalActive = Array.from({ length: NP }, () => 0);
+  const projLocalDays: Set<string>[] = Array.from({ length: NP }, () => new Set());
+  const projLocalLast = Array.from({ length: NP }, () => 0);
 
-  const segments: any[] = [];
   for (const [pid, evs] of perPid) {
-    const lane = laneOf.get(pid);
-    if (lane === undefined) continue;
+    for (const [ep] of evs) projLocalDays[pid].add(dayKey(ep));
+  }
+
+  const addRawSegment = (segment: RawSegment) => {
+    rawSegments.push(segment);
+    let own = segmentsByPid.get(segment.pid);
+    if (!own) segmentsByPid.set(segment.pid, (own = []));
+    own.push(segment);
+    projLocalActive[segment.pid] += segment.e - segment.s;
+    projLocalLast[segment.pid] = Math.max(projLocalLast[segment.pid], segment.e);
+  };
+
+  for (const [pid, evs] of perPid) {
     let segStart = evs[0][0];
     let last = evs[0][0];
     let segPrompts = evs[0][1] ? 1 : 0;
     for (let k = 1; k < evs.length; k++) {
       const [ep, isp] = evs[k];
       if (ep - last > gap) {
-        segments.push({ p: lane, s: segStart, e: last + floor, n: segPrompts });
+        addRawSegment({ pid, s: segStart, e: last + floor, n: segPrompts });
         segStart = ep;
         segPrompts = 0;
       }
       last = ep;
       segPrompts += isp ? 1 : 0;
     }
-    segments.push({ p: lane, s: segStart, e: last + floor, n: segPrompts });
+    addRawSegment({ pid, s: segStart, e: last + floor, n: segPrompts });
+  }
+
+  // 排他的な総稼働時間は変えず、各グローバル作業ブロック内の案件内時間を
+  // 重みとして比例按分する。これにより案件別合計は総稼働と必ず一致する。
+  const projApportionedActive = Array.from({ length: NP }, () => 0);
+  const segmentCursor = Array.from({ length: NP }, () => 0);
+  for (const block of blocks) {
+    const total = Object.values(block.pids).reduce((sum: number, value) => sum + Number(value), 0);
+    if (total <= 0) continue;
+    const blockStart = block.rstart as number;
+    const blockEnd = (block.rend as number) + floor;
+    const weights = new Map<number, number>();
+
+    for (const [pid, own] of segmentsByPid) {
+      let cursor = segmentCursor[pid];
+      while (cursor < own.length && own[cursor].e <= blockStart) cursor++;
+      segmentCursor[pid] = cursor;
+      let overlap = 0;
+      for (let i = cursor; i < own.length && own[i].s < blockEnd; i++) {
+        overlap += Math.max(0, Math.min(own[i].e, blockEnd) - Math.max(own[i].s, blockStart));
+      }
+      if (overlap > 0) weights.set(pid, overlap);
+    }
+
+    const weightTotal = [...weights.values()].reduce((sum, value) => sum + value, 0);
+    const apportionedPids: Record<number, number> = {};
+    if (weightTotal > 0) {
+      for (const [pid, weight] of weights) {
+        const share = (total * weight) / weightTotal;
+        projApportionedActive[pid] += share;
+        apportionedPids[pid] = share;
+      }
+    } else {
+      // 原理上は到達しないが、ログ形式変更時にも総時間を失わないフォールバック。
+      for (const [pidText, value] of Object.entries(block.pids)) {
+        const pid = Number(pidText);
+        const share = Number(value);
+        projApportionedActive[pid] += share;
+        apportionedPids[pid] = share;
+      }
+    }
+    block.apportionedPids = apportionedPids;
+  }
+
+  const laneOrder = Array.from({ length: NP }, (_, i) => i)
+    .filter((i) => projApportionedActive[i] > 0)
+    .sort((a, b) => projApportionedActive[b] - projApportionedActive[a]);
+  const laneOf = new Map<number, number>();
+  laneOrder.forEach((pid, idx) => laneOf.set(pid, idx));
+
+  const segments: any[] = [];
+  for (const segment of rawSegments) {
+    const pid = segment.pid;
+    const lane = laneOf.get(pid);
+    if (lane === undefined) continue;
+    segments.push({ p: lane, s: segment.s, e: segment.e, n: segment.n });
   }
   segments.sort((a, b) => a.s - b.s);
   const laneEnd: number[] = [];
@@ -392,7 +470,11 @@ export function analyze(results: Map<string, FileData>, gapMin: number, floorMin
     start: allEvents.length ? allEvents[0][0] : 0,
     end: allEvents.length ? allEvents[allEvents.length - 1][0] + floor : 0,
     nLanes: laneEnd.length,
-    lanes: laneOrder.map((pid) => ({ name: projNames[pid], active: round(projActive[pid] / 3.6e6, 2) })),
+    lanes: laneOrder.map((pid) => ({
+      name: projNames[pid],
+      active: round(projApportionedActive[pid] / 3.6e6, 2),
+      localActive: round(projLocalActive[pid] / 3.6e6, 2),
+    })),
     segments,
   };
 
@@ -413,10 +495,13 @@ export function analyze(results: Map<string, FileData>, gapMin: number, floorMin
   const projects = laneOrder
     .map((i) => ({
       name: projNames[i],
-      active: round(projActive[i] / 3.6e6, 3),
-      days: projDays[i].size,
+      active: round(projApportionedActive[i] / 3.6e6, 3),
+      localActive: round(projLocalActive[i] / 3.6e6, 3),
+      exclusiveActive: round(projActive[i] / 3.6e6, 3),
+      sharedActive: round(Math.max(0, projLocalActive[i] - projApportionedActive[i]) / 3.6e6, 3),
+      days: projLocalDays[i].size,
       prompts: projPrompts[i],
-      last: projLast[i] ? dayKey(projLast[i]) : "",
+      last: projLocalLast[i] ? dayKey(projLocalLast[i]) : "",
     }))
     .filter((p) => p.active > 0 || p.prompts > 0)
     .sort((a, b) => b.active - a.active);
@@ -424,7 +509,10 @@ export function analyze(results: Map<string, FileData>, gapMin: number, floorMin
   // recent blocks
   blocks.sort((a, b) => b.rstart - a.rstart);
   const recent = blocks.slice(0, 50).map((b) => {
-    const domPid = Number(Object.entries(b.pids).sort((x, y) => (y[1] as number) - (x[1] as number))[0][0]);
+    const blockPids = b.apportionedPids ?? b.pids;
+    const domPid = Number(
+      Object.entries(blockPids).sort((x, y) => (y[1] as number) - (x[1] as number))[0][0],
+    );
     const dur = Object.values(b.pids).reduce((s: number, v: any) => s + v, 0) as number;
     const sd = new Date(b.rstart),
       ed = new Date(b.rend);
@@ -441,7 +529,7 @@ export function analyze(results: Map<string, FileData>, gapMin: number, floorMin
   const totalActive = dailyList.reduce((s, d) => s + d.active, 0);
   const daysActive = dailyList.filter((d) => d.active > 0).length;
   const maxDay = dailyList.reduce((m, d) => (!m || d.active > m.active ? d : m), null as any);
-  const hourTot = new Array(24).fill(0);
+  const hourTot = Array.from({ length: 24 }, () => 0);
   for (let w = 0; w < 7; w++) for (let h = 0; h < 24; h++) hourTot[h] += rhythm[w][h];
   const anyHour = hourTot.some((x) => x > 0);
   const busiestHour = anyHour ? hourTot.indexOf(Math.max(...hourTot)) : null;
@@ -501,13 +589,15 @@ function printSummary(m: any) {
   const fix = (v: number) => v.toFixed(1).padStart(7);
   console.log();
   console.log(`  期間            : ${s.firstDate} 〜 ${s.lastDate}  (tz=${m.tz})`);
-  console.log(`  総アクティブ時間: ${s.activeHours} h  (gap=${m.gapMin}分 / floor=${m.floorMin}分)`);
+  console.log(
+    `  総アクティブ時間: ${s.activeHours} h  (gap=${m.gapMin}分 / floor=${m.floorMin}分)`,
+  );
   console.log(`  稼働日数        : ${s.daysActive} 日  /  平均 ${s.avgPerDay} h/日`);
   if (s.maxDay) console.log(`  最長の日        : ${s.maxDay.date}  (${s.maxDay.hours} h)`);
   console.log(`  作業ブロック数  : ${s.blocks}  /  Claudeセッション ${s.sessions}`);
   console.log(`  プロンプト数    : ${s.prompts}  /  アシスタント応答 ${s.assistantMsgs}`);
   if (s.busiestHour !== null) console.log(`  最も活発な時間帯: ${pad(s.busiestHour)}:00 台`);
-  console.log(`\n  トップ5プロジェクト(アクティブ時間):`);
+  console.log(`\n  トップ5プロジェクト(按分時間):`);
   for (const p of m.projects.slice(0, 5))
     console.log(`    ${fix(p.active)} h  ${p.name}  (${p.days}日, ${p.prompts}prompts)`);
   console.log();
@@ -528,6 +618,7 @@ async function main() {
       "no-cache": { type: "boolean", default: false },
       ignore: { type: "string", multiple: true },
       json: { type: "string" },
+      month: { type: "string" },
       help: { type: "boolean", default: false },
     },
     allowPositionals: true,
@@ -537,18 +628,20 @@ async function main() {
     console.log(
       `cc-worklog — Claude Code 稼働時間/タイムライン分析\n\n` +
         `使い方: cc-worklog [--open] [--gap 15] [--floor 2] [--out dashboard.html]\n` +
-        `        [--ignore name1,name2] [--json metrics.json] [--rebuild] [--no-cache]\n`,
+        `        [--ignore name1,name2] [--month YYYY-MM] [--json metrics.json] [--rebuild] [--no-cache]\n`,
     );
     return;
   }
 
   const gap = Number(values.gap);
   const floor = Number(values.floor);
+  const month = values.month as string | undefined;
   const ignore = loadIgnore(values.ignore as string[] | undefined);
   if (ignore.size) console.error(`[ccw] 除外プロジェクト: ${[...ignore].sort().join(", ")}`);
 
+  if (month) console.error(`[ccw] 対象月: ${month}`);
   const results = await loadAll(!values["no-cache"], values.rebuild);
-  const metrics = analyze(results, gap, floor, ignore);
+  const metrics = analyze(results, gap, floor, ignore, month);
 
   const outPath = values.out!;
   await Bun.write(outPath, renderHtml(metrics));
@@ -566,7 +659,12 @@ async function main() {
   printSummary(metrics);
 
   if (values.open) {
-    const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer" : "xdg-open";
+    const opener =
+      process.platform === "darwin"
+        ? "open"
+        : process.platform === "win32"
+          ? "explorer"
+          : "xdg-open";
     Bun.spawn([opener, resolve(outPath)]);
   }
 }
