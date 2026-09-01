@@ -18,7 +18,7 @@ const PROJECTS_DIR = join(homedir(), ".claude", "projects");
 const CODEX_DIR = join(homedir(), ".codex", "sessions");
 const ANTIGRAVITY_HISTORY = join(homedir(), ".gemini", "antigravity-cli", "history.jsonl");
 const CACHE_DIR = join(homedir(), ".cache", "cc-worklog");
-const CACHE_VERSION = 4;
+const CACHE_VERSION = 5;
 const MIN_EPOCH_MS = 1700000000000; // 2023-11 頃
 const MAX_EPOCH_SLACK_MS = 2 * 86400 * 1000;
 const ALL_SOURCES = ["claude", "codex", "antigravity"] as const;
@@ -30,7 +30,11 @@ export type FileData = {
   nUser: number;
   nPrompt: number;
   sessions: string[];
+  originator?: string; // codex のみ: session_meta.originator (codex_exec 等の自動実行判定用)
 };
+
+// codex の自動/非対話実行(手作業でない稼働)を判定する originator パターン。
+const CODEX_AUTOMATED_RE = /exec|harness|swarm|agent|bot|batch|\bci\b/i;
 
 // --------------------------------------------------------------------------- //
 // パース
@@ -90,6 +94,7 @@ async function parseFile(path: string): Promise<FileData> {
 // 各行に top-level timestamp、session_meta.payload.cwd に作業ディレクトリ。
 async function parseCodexFile(path: string): Promise<FileData> {
   let project: string | null = null;
+  let originator: string | undefined;
   const events: [number, boolean][] = [];
   let nAssistant = 0,
     nUser = 0,
@@ -115,6 +120,7 @@ async function parseCodexFile(path: string): Promise<FileData> {
     if (typ === "session_meta") {
       const p = d.payload ?? {};
       if (project === null && p.cwd) project = p.cwd;
+      if (originator === undefined && p.originator) originator = String(p.originator);
       if (p.id) sessions.add(p.id);
       continue;
     }
@@ -132,7 +138,7 @@ async function parseCodexFile(path: string): Promise<FileData> {
     events.push([ep, isPrompt]);
   }
   events.sort((a, b) => a[0] - b[0]);
-  return { project, events, nAssistant, nUser, nPrompt, sessions: [...sessions] };
+  return { project, events, nAssistant, nUser, nPrompt, sessions: [...sessions], originator };
 }
 
 // --------------------------------------------------------------------------- //
@@ -163,11 +169,13 @@ async function loadJsonlDir(
   useCache: boolean,
   rebuild: boolean,
   results: Map<string, FileData>,
-): Promise<{ files: number; stale: number }> {
+  keep?: (data: FileData) => boolean,
+): Promise<{ files: number; stale: number; kept: number }> {
   const glob = new Bun.Glob("**/*.jsonl");
   const files: string[] = [];
   for await (const f of glob.scan({ cwd: dir, absolute: true })) files.push(f);
 
+  let kept = 0;
   const stale: { path: string; mtime: number; size: number }[] = [];
   for (const p of files) {
     let st;
@@ -179,7 +187,10 @@ async function loadJsonlDir(
     if (useCache && !rebuild) {
       const cached = await loadCached(p, st.mtimeMs, st.size);
       if (cached) {
-        results.set(p, cached);
+        if (!keep || keep(cached)) {
+          results.set(p, cached);
+          kept++;
+        }
         continue;
       }
     }
@@ -192,12 +203,15 @@ async function loadJsonlDir(
     while (i < stale.length) {
       const item = stale[i++];
       const data = await parser(item.path);
-      results.set(item.path, data);
-      await storeCache(item.path, item.mtime, item.size, data);
+      await storeCache(item.path, item.mtime, item.size, data); // フィルタ前にキャッシュ
+      if (!keep || keep(data)) {
+        results.set(item.path, data);
+        kept++;
+      }
     }
   }
   await Promise.all(Array.from({ length: Math.min(CONC, stale.length) }, worker));
-  return { files: files.length, stale: stale.length };
+  return { files: files.length, stale: stale.length, kept };
 }
 
 // Antigravity CLI の履歴 (~/.gemini/antigravity-cli/history.jsonl)。
@@ -272,6 +286,7 @@ async function loadAll(
   sources: Set<string>,
   useCache: boolean,
   rebuild: boolean,
+  codexInteractiveOnly: boolean,
 ): Promise<Map<string, FileData>> {
   mkdirSync(CACHE_DIR, { recursive: true });
   const results = new Map<string, FileData>();
@@ -279,11 +294,16 @@ async function loadAll(
 
   if (sources.has("claude") && existsSync(PROJECTS_DIR)) {
     const r = await loadJsonlDir(PROJECTS_DIR, parseFile, useCache, rebuild, results);
-    parts.push(`claude ${r.files}件(要パース${r.stale})`);
+    parts.push(`claude ${r.files}件`);
   }
   if (sources.has("codex") && existsSync(CODEX_DIR)) {
-    const r = await loadJsonlDir(CODEX_DIR, parseCodexFile, useCache, rebuild, results);
-    parts.push(`codex ${r.files}件(要パース${r.stale})`);
+    const keep = codexInteractiveOnly
+      ? (d: FileData) => !CODEX_AUTOMATED_RE.test(d.originator ?? "")
+      : undefined;
+    const r = await loadJsonlDir(CODEX_DIR, parseCodexFile, useCache, rebuild, results, keep);
+    parts.push(
+      codexInteractiveOnly ? `codex ${r.kept}/${r.files}件(対話のみ)` : `codex ${r.files}件`,
+    );
   }
   if (sources.has("antigravity")) {
     const n = await loadAntigravity(useCache, rebuild, results);
@@ -765,6 +785,7 @@ async function main() {
       json: { type: "string" },
       month: { type: "string" },
       source: { type: "string" },
+      "codex-mode": { type: "string" }, // interactive(既定) | all
       help: { type: "boolean", default: false },
     },
     allowPositionals: true,
@@ -774,8 +795,8 @@ async function main() {
     console.log(
       `cc-worklog — Claude Code / Codex / Antigravity 稼働時間・タイムライン分析\n\n` +
         `使い方: cc-worklog [--open] [--gap 15] [--floor 2] [--out dashboard.html]\n` +
-        `        [--source claude,codex,antigravity] [--ignore name1,name2] [--month YYYY-MM]\n` +
-        `        [--json metrics.json] [--rebuild] [--no-cache]\n`,
+        `        [--source claude,codex,antigravity] [--codex-mode interactive|all]\n` +
+        `        [--ignore name1,name2] [--month YYYY-MM] [--json metrics.json] [--rebuild] [--no-cache]\n`,
     );
     return;
   }
@@ -796,8 +817,13 @@ async function main() {
       : ALL_SOURCES,
   );
   console.error(`[ccw] ソース: ${[...sources].join(", ")}`);
+  const codexInteractiveOnly = (values["codex-mode"] as string | undefined) !== "all";
+  if (sources.has("codex"))
+    console.error(
+      `[ccw] codex: ${codexInteractiveOnly ? "対話のみ(codex_exec等の自動実行を除外)" : "全て"}`,
+    );
   if (month) console.error(`[ccw] 対象月: ${month}`);
-  const results = await loadAll(sources, !values["no-cache"], values.rebuild);
+  const results = await loadAll(sources, !values["no-cache"], values.rebuild, codexInteractiveOnly);
   const metrics = analyze(results, gap, floor, ignore, month);
 
   const outPath = values.out!;

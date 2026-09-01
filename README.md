@@ -82,6 +82,7 @@ cc-worklog --json out.json # 集計結果を JSON でも出力
 | `--json PATH` | - | 集計 JSON も書き出す |
 | `--month YYYY-MM` | - | 指定した暦月（ローカルタイムゾーン）だけ集計する |
 | `--source a,b` | all | 集計ソース（`claude` / `codex` / `antigravity`。既定は全部） |
+| `--codex-mode` | interactive | codex を対話のみ(`interactive`)にするか全部(`all`)か。`interactive` は `codex_exec` 等の自動/非対話実行(`session_meta.originator`)を除外する |
 | `--open` | - | 生成後にブラウザで開く |
 | `--ignore a,b` | - | 除外プロジェクト（カンマ区切り・複数可）。`ctlignore.txt` にも書ける |
 | `--rebuild` | - | キャッシュを無視して全ファイル再パース |
