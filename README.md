@@ -1,10 +1,23 @@
 # cc-worklog
 
-Claude Code の稼働時間 / タイムラインを分析するツール（**依存ゼロ・完全ローカル・Bun 単一バイナリ**）。
-`~/.claude/projects/**/*.jsonl` のセッションログを読み、**アクティブ時間**（実際に手を動かしていた時間）を
+**Claude Code / Codex / Antigravity** の稼働時間 / タイムラインを分析するツール（**依存ゼロ・完全ローカル・Bun 単一バイナリ**）。
+複数の AI コーディングツールのセッションログを横断し、**アクティブ時間**（実際に手を動かしていた時間）を
 ギャップベースで推定して、自己完結の **HTML ダッシュボード** と **並行作業タイムライン** を生成する。
 
 データは外部に一切送信されない（HTML も CDN 不使用の自己完結）。
+
+## 対応ソース
+
+| ソース | ログの場所 | 内容 |
+|---|---|---|
+| `claude` | `~/.claude/projects/**/*.jsonl` | Claude Code。user/assistant イベント |
+| `codex` | `~/.codex/sessions/**/*.jsonl` | Codex CLI。`session_meta.cwd` で案件判定、event_msg/response_item をイベント化 |
+| `antigravity` | `~/.gemini/antigravity-cli/history.jsonl` | Antigravity。ユーザープロンプト（`workspace` で案件判定） |
+
+各ソースの `cwd`/`workspace` を git ロールアップで同じ案件名に集約するので、
+**同一リポジトリを Claude・Codex・Antigravity のどれで触っても 1 つの案件に合流**する。
+全ソースを 1 本の時系列にマージして稼働時間を出すため、ツールをまたいだ同時刻の重複も二重計上しない。
+`--source claude` のように絞り込みも可能。
 
 ## スクリーンショット
 
@@ -68,6 +81,7 @@ cc-worklog --json out.json # 集計結果を JSON でも出力
 | `--out PATH` | dashboard.html | 出力 HTML パス（timeline.html は同じディレクトリに出る） |
 | `--json PATH` | - | 集計 JSON も書き出す |
 | `--month YYYY-MM` | - | 指定した暦月（ローカルタイムゾーン）だけ集計する |
+| `--source a,b` | all | 集計ソース（`claude` / `codex` / `antigravity`。既定は全部） |
 | `--open` | - | 生成後にブラウザで開く |
 | `--ignore a,b` | - | 除外プロジェクト（カンマ区切り・複数可）。`ctlignore.txt` にも書ける |
 | `--rebuild` | - | キャッシュを無視して全ファイル再パース |

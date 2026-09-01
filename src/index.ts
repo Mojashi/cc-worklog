@@ -15,10 +15,13 @@ import dashboardTpl from "./dashboard.html.txt" with { type: "text" };
 import timelineTpl from "./timeline.html.txt" with { type: "text" };
 
 const PROJECTS_DIR = join(homedir(), ".claude", "projects");
+const CODEX_DIR = join(homedir(), ".codex", "sessions");
+const ANTIGRAVITY_HISTORY = join(homedir(), ".gemini", "antigravity-cli", "history.jsonl");
 const CACHE_DIR = join(homedir(), ".cache", "cc-worklog");
 const CACHE_VERSION = 4;
 const MIN_EPOCH_MS = 1700000000000; // 2023-11 頃
 const MAX_EPOCH_SLACK_MS = 2 * 86400 * 1000;
+const ALL_SOURCES = ["claude", "codex", "antigravity"] as const;
 
 export type FileData = {
   project: string | null;
@@ -83,6 +86,55 @@ async function parseFile(path: string): Promise<FileData> {
   return { project, events, nAssistant, nUser, nPrompt, sessions: [...sessions] };
 }
 
+// Codex CLI のセッションログ (~/.codex/sessions/**/*.jsonl)。
+// 各行に top-level timestamp、session_meta.payload.cwd に作業ディレクトリ。
+async function parseCodexFile(path: string): Promise<FileData> {
+  let project: string | null = null;
+  const events: [number, boolean][] = [];
+  let nAssistant = 0,
+    nUser = 0,
+    nPrompt = 0;
+  const sessions = new Set<string>();
+  let text: string;
+  try {
+    text = await Bun.file(path).text();
+  } catch {
+    return { project, events, nAssistant, nUser, nPrompt, sessions: [] };
+  }
+  for (const line of text.split("\n")) {
+    if (!line.includes('"timestamp"')) continue;
+    let d: any;
+    try {
+      d = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const ep = isoToEpoch(d.timestamp ?? "");
+    if (ep === null) continue;
+    const typ = d.type;
+    if (typ === "session_meta") {
+      const p = d.payload ?? {};
+      if (project === null && p.cwd) project = p.cwd;
+      if (p.id) sessions.add(p.id);
+      continue;
+    }
+    if (typ !== "event_msg" && typ !== "response_item") continue;
+    let isPrompt = false;
+    if (typ === "response_item" && d.payload?.type === "message") {
+      const role = d.payload.role;
+      if (role === "assistant") nAssistant++;
+      else if (role === "user") {
+        nUser++;
+        isPrompt = true;
+        nPrompt++;
+      }
+    }
+    events.push([ep, isPrompt]);
+  }
+  events.sort((a, b) => a[0] - b[0]);
+  return { project, events, nAssistant, nUser, nPrompt, sessions: [...sessions] };
+}
+
 // --------------------------------------------------------------------------- //
 // キャッシュ付きロード
 // --------------------------------------------------------------------------- //
@@ -104,18 +156,18 @@ async function storeCache(p: string, mtimeMs: number, size: number, data: FileDa
   } catch {}
 }
 
-async function loadAll(useCache: boolean, rebuild: boolean): Promise<Map<string, FileData>> {
-  if (!existsSync(PROJECTS_DIR)) {
-    console.error(`見つかりません: ${PROJECTS_DIR}`);
-    process.exit(1);
-  }
-  mkdirSync(CACHE_DIR, { recursive: true });
-
+// dir 配下の *.jsonl を parser でパースし results に入れる。件数を返す。
+async function loadJsonlDir(
+  dir: string,
+  parser: (path: string) => Promise<FileData>,
+  useCache: boolean,
+  rebuild: boolean,
+  results: Map<string, FileData>,
+): Promise<{ files: number; stale: number }> {
   const glob = new Bun.Glob("**/*.jsonl");
   const files: string[] = [];
-  for await (const f of glob.scan({ cwd: PROJECTS_DIR, absolute: true })) files.push(f);
+  for await (const f of glob.scan({ cwd: dir, absolute: true })) files.push(f);
 
-  const results = new Map<string, FileData>();
   const stale: { path: string; mtime: number; size: number }[] = [];
   for (const p of files) {
     let st;
@@ -134,22 +186,115 @@ async function loadAll(useCache: boolean, rebuild: boolean): Promise<Map<string,
     stale.push({ path: p, mtime: st.mtimeMs, size: st.size });
   }
 
-  console.error(
-    `[ccw] jsonl ${files.length} 件 / 要パース ${stale.length} 件 (キャッシュ ${files.length - stale.length} 件)`,
-  );
-
-  // 並行パース(I/O重複)
   const CONC = 24;
   let i = 0;
   async function worker() {
     while (i < stale.length) {
       const item = stale[i++];
-      const data = await parseFile(item.path);
+      const data = await parser(item.path);
       results.set(item.path, data);
       await storeCache(item.path, item.mtime, item.size, data);
     }
   }
   await Promise.all(Array.from({ length: Math.min(CONC, stale.length) }, worker));
+  return { files: files.length, stale: stale.length };
+}
+
+// Antigravity CLI の履歴 (~/.gemini/antigravity-cli/history.jsonl)。
+// 各行 {timestamp(ms), workspace, conversationId} = ユーザープロンプト。workspace 単位に束ねる。
+async function loadAntigravity(
+  useCache: boolean,
+  rebuild: boolean,
+  results: Map<string, FileData>,
+): Promise<number> {
+  if (!existsSync(ANTIGRAVITY_HISTORY)) return 0;
+  let st;
+  try {
+    st = statSync(ANTIGRAVITY_HISTORY);
+  } catch {
+    return 0;
+  }
+  const cp = cachePath(ANTIGRAVITY_HISTORY);
+  let grouped: Record<string, FileData> | null = null;
+  if (useCache && !rebuild) {
+    try {
+      const c: any = JSON.parse(await Bun.file(cp).text());
+      if (c.v === CACHE_VERSION && c.mtime === st.mtimeMs && c.size === st.size) grouped = c.data;
+    } catch {}
+  }
+  if (!grouped) {
+    grouped = {};
+    const text = await Bun.file(ANTIGRAVITY_HISTORY).text();
+    for (const line of text.split("\n")) {
+      if (!line.includes('"timestamp"')) continue;
+      let d: any;
+      try {
+        d = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const ws = d.workspace;
+      const ts = d.timestamp;
+      if (!ws || typeof ts !== "number") continue;
+      let fd = grouped[ws];
+      if (!fd)
+        fd = grouped[ws] = {
+          project: ws,
+          events: [],
+          nAssistant: 0,
+          nUser: 0,
+          nPrompt: 0,
+          sessions: [],
+        };
+      fd.events.push([ts, true]);
+      fd.nUser++;
+      fd.nPrompt++;
+      if (d.conversationId && !fd.sessions.includes(d.conversationId))
+        fd.sessions.push(d.conversationId);
+    }
+    for (const fd of Object.values(grouped)) fd.events.sort((a, b) => a[0] - b[0]);
+    try {
+      await Bun.write(
+        cp,
+        JSON.stringify({ v: CACHE_VERSION, mtime: st.mtimeMs, size: st.size, data: grouped }),
+      );
+    } catch {}
+  }
+  let n = 0;
+  for (const [ws, fd] of Object.entries(grouped)) {
+    results.set(`antigravity:${ws}`, fd);
+    n++;
+  }
+  return n;
+}
+
+async function loadAll(
+  sources: Set<string>,
+  useCache: boolean,
+  rebuild: boolean,
+): Promise<Map<string, FileData>> {
+  mkdirSync(CACHE_DIR, { recursive: true });
+  const results = new Map<string, FileData>();
+  const parts: string[] = [];
+
+  if (sources.has("claude") && existsSync(PROJECTS_DIR)) {
+    const r = await loadJsonlDir(PROJECTS_DIR, parseFile, useCache, rebuild, results);
+    parts.push(`claude ${r.files}件(要パース${r.stale})`);
+  }
+  if (sources.has("codex") && existsSync(CODEX_DIR)) {
+    const r = await loadJsonlDir(CODEX_DIR, parseCodexFile, useCache, rebuild, results);
+    parts.push(`codex ${r.files}件(要パース${r.stale})`);
+  }
+  if (sources.has("antigravity")) {
+    const n = await loadAntigravity(useCache, rebuild, results);
+    if (n) parts.push(`antigravity ${n}ワークスペース`);
+  }
+
+  if (!results.size) {
+    console.error(`ログが見つかりません (sources: ${[...sources].join(",")})`);
+    process.exit(1);
+  }
+  console.error(`[ccw] ${parts.join(" / ")}`);
   return results;
 }
 
@@ -619,6 +764,7 @@ async function main() {
       ignore: { type: "string", multiple: true },
       json: { type: "string" },
       month: { type: "string" },
+      source: { type: "string" },
       help: { type: "boolean", default: false },
     },
     allowPositionals: true,
@@ -626,9 +772,10 @@ async function main() {
 
   if (values.help) {
     console.log(
-      `cc-worklog — Claude Code 稼働時間/タイムライン分析\n\n` +
+      `cc-worklog — Claude Code / Codex / Antigravity 稼働時間・タイムライン分析\n\n` +
         `使い方: cc-worklog [--open] [--gap 15] [--floor 2] [--out dashboard.html]\n` +
-        `        [--ignore name1,name2] [--month YYYY-MM] [--json metrics.json] [--rebuild] [--no-cache]\n`,
+        `        [--source claude,codex,antigravity] [--ignore name1,name2] [--month YYYY-MM]\n` +
+        `        [--json metrics.json] [--rebuild] [--no-cache]\n`,
     );
     return;
   }
@@ -639,8 +786,18 @@ async function main() {
   const ignore = loadIgnore(values.ignore as string[] | undefined);
   if (ignore.size) console.error(`[ccw] 除外プロジェクト: ${[...ignore].sort().join(", ")}`);
 
+  const sourceArg = (values.source as string | undefined)?.trim();
+  const sources = new Set(
+    sourceArg && sourceArg !== "all"
+      ? sourceArg
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : ALL_SOURCES,
+  );
+  console.error(`[ccw] ソース: ${[...sources].join(", ")}`);
   if (month) console.error(`[ccw] 対象月: ${month}`);
-  const results = await loadAll(!values["no-cache"], values.rebuild);
+  const results = await loadAll(sources, !values["no-cache"], values.rebuild);
   const metrics = analyze(results, gap, floor, ignore, month);
 
   const outPath = values.out!;
