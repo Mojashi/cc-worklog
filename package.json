@@ -1,6 +1,6 @@
 {
   "name": "cc-worklog",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Claude Code の稼働時間 / タイムライン分析ツール（依存ゼロ・完全ローカル・Bun単一バイナリ）",
   "bin": {
     "cc-worklog": "src/index.ts"
