@@ -354,23 +354,49 @@ function projectName(cwd: string | null, path: string): string {
   return d ? d.split("-").pop()! : "(unknown)";
 }
 
-function loadIgnore(cli: string[] | undefined): Set<string> {
-  const names = new Set<string>();
-  const cfg = join(process.cwd(), "ctlignore.txt");
-  if (existsSync(cfg)) {
-    try {
-      for (let line of readFileSync(cfg, "utf8").split("\n")) {
-        line = line.split("#")[0].trim();
-        if (line) names.add(line);
-      }
-    } catch {}
+/** 除外リストの取得元。どこ由来かを表示できるように残す。 */
+type IgnoreOrigin = { label: string; names: string[] };
+
+/** ユーザー単位の設定ファイル。どのディレクトリから実行しても効く。 */
+export function userIgnoreFile(): string {
+  const base = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+  return join(base, "cc-worklog", "ctlignore.txt");
+}
+
+/** 1 行 1 プロジェクト名、`#` 以降はコメント。 */
+function readIgnoreFile(path: string): string[] {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    // 置いてあるのに読めないのは設定ミス。黙って無視すると
+    // 除外したつもりの案件が集計に入り続ける。
+    throw new Error(`除外リストを読めません: ${path}: ${(error as Error).message}`);
   }
-  for (const item of cli ?? [])
-    for (const n of item.split(",")) {
-      const t = n.trim();
-      if (t) names.add(t);
-    }
-  return names;
+  return text
+    .split("\n")
+    .map((line) => line.split("#")[0].trim())
+    .filter(Boolean);
+}
+
+function loadIgnore(cli: string[] | undefined): { names: Set<string>; origins: IgnoreOrigin[] } {
+  const origins: IgnoreOrigin[] = [];
+  for (const path of [userIgnoreFile(), join(process.cwd(), "ctlignore.txt")]) {
+    if (!existsSync(path)) continue;
+    const names = readIgnoreFile(path);
+    if (names.length) origins.push({ label: path, names });
+  }
+  const fromFlag = (cli ?? []).flatMap((item) =>
+    item
+      .split(",")
+      .map((n) => n.trim())
+      .filter(Boolean),
+  );
+  if (fromFlag.length) origins.push({ label: "--ignore", names: fromFlag });
+
+  const names = new Set<string>();
+  for (const origin of origins) for (const n of origin.names) names.add(n);
+  return { names, origins };
 }
 
 // --------------------------------------------------------------------------- //
@@ -836,7 +862,10 @@ async function main() {
         `使い方: cc-worklog [--open] [--gap 15] [--floor 2] [--out dashboard.html]\n` +
         `        [--source claude,codex,antigravity] [--codex-mode interactive|all]\n` +
         `        [--ignore name1,name2] [--month YYYY-MM | --from YYYY-MM-DD --to YYYY-MM-DD]\n` +
-        `        [--json metrics.json] [--rebuild] [--no-cache]\n`,
+        `        [--json metrics.json] [--rebuild] [--no-cache]\n\n` +
+        `除外プロジェクトは --ignore と、次の 2 つのファイル(1行1名前, # でコメント)から読む:\n` +
+        `  ${userIgnoreFile()}  (ユーザー設定。どこで実行しても効く)\n` +
+        `  ./ctlignore.txt                        (実行したディレクトリ)\n`,
     );
     return;
   }
@@ -850,8 +879,14 @@ async function main() {
     throw new Error("--month と --from/--to は同時に指定できません");
   }
   const period = month ? monthPeriod(month) : from || to ? rangePeriod(from, to) : ALL_PERIOD;
-  const ignore = loadIgnore(values.ignore as string[] | undefined);
-  if (ignore.size) console.error(`[ccw] 除外プロジェクト: ${[...ignore].sort().join(", ")}`);
+  const { names: ignore, origins: ignoreOrigins } = loadIgnore(
+    values.ignore as string[] | undefined,
+  );
+  if (ignore.size) {
+    console.error(`[ccw] 除外プロジェクト: ${[...ignore].sort().join(", ")}`);
+    for (const origin of ignoreOrigins)
+      console.error(`[ccw]   ${origin.label}: ${origin.names.join(", ")}`);
+  }
 
   const sourceArg = (values.source as string | undefined)?.trim();
   const sources = new Set(
