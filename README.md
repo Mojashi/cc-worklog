@@ -69,7 +69,11 @@ bun run build:all      # 全OS/アーキ向けにクロスコンパイル
 cc-worklog                 # 解析して dashboard.html + timeline.html を生成 + サマリ表示
 cc-worklog --open          # 生成後にブラウザで開く
 cc-worklog --json out.json # 集計結果を JSON でも出力
+cc-worklog --month 2026-09 # 暦月で絞る
+cc-worklog --from 2026-08-27 --to 2026-09-27  # 任意期間で絞る（月報の締め日が月末でない場合など）
 ```
+
+`--month` と `--from`/`--to` は同時に指定できない。
 
 初回は全 jsonl をパースする（数万ファイルでも ~20 秒）。結果は `~/.cache/cc-worklog/` に
 ファイル単位でキャッシュされ、2 回目以降は変更があったファイルだけ再パースする。
@@ -81,6 +85,8 @@ cc-worklog --json out.json # 集計結果を JSON でも出力
 | `--out PATH` | dashboard.html | 出力 HTML パス（timeline.html は同じディレクトリに出る） |
 | `--json PATH` | - | 集計 JSON も書き出す |
 | `--month YYYY-MM` | - | 指定した暦月（ローカルタイムゾーン）だけ集計する |
+| `--from YYYY-MM-DD` | - | 集計開始日（その日の 00:00 から。ローカル）。`--to` と組み合わせて任意期間を切れる |
+| `--to YYYY-MM-DD` | - | 集計終了日（その日の 23:59 まで、両端を含む） |
 | `--source a,b` | all | 集計ソース（`claude` / `codex` / `antigravity`。既定は全部） |
 | `--codex-mode` | interactive | codex を対話のみ(`interactive`)にするか全部(`all`)か。`interactive` は `codex_exec` 等の自動/非対話実行(`session_meta.originator`)を除外する |
 | `--open` | - | 生成後にブラウザで開く |

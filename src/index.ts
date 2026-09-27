@@ -382,21 +382,58 @@ const dayKey = (ms: number) => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 };
 
+/** 集計対象の期間。`covers` が true のイベントだけを数える。 */
+export type Period = { label: string; covers: (ep: number) => boolean };
+
+export const ALL_PERIOD: Period = { label: "全期間", covers: () => true };
+
+/** `YYYY-MM` の暦月。ローカルタイムゾーンで判定する。 */
+export function monthPeriod(month: string): Period {
+  if (!/^\d{4}-\d{2}$/.test(month)) {
+    throw new Error(`--month は YYYY-MM 形式で指定してください: ${month}`);
+  }
+  return {
+    label: month,
+    covers: (ep) => {
+      const d = new Date(ep);
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}` === month;
+    },
+  };
+}
+
+/** `YYYY-MM-DD` の任意期間。両端を含む（from の 00:00 〜 to の 23:59:59.999、ローカル）。 */
+export function rangePeriod(from?: string, to?: string): Period {
+  const parseDay = (flag: string, value: string, endOfDay: boolean) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+    if (!m) throw new Error(`${flag} は YYYY-MM-DD 形式で指定してください: ${value}`);
+    const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+    const at = endOfDay
+      ? new Date(y, mo - 1, d, 23, 59, 59, 999)
+      : new Date(y, mo - 1, d, 0, 0, 0, 0);
+    if (at.getFullYear() !== y || at.getMonth() !== mo - 1 || at.getDate() !== d) {
+      throw new Error(`${flag} に存在しない日付が指定されました: ${value}`);
+    }
+    return at.getTime();
+  };
+  const start = from ? parseDay("--from", from, false) : Number.NEGATIVE_INFINITY;
+  const end = to ? parseDay("--to", to, true) : Number.POSITIVE_INFINITY;
+  if (start > end) throw new Error(`--from が --to より後になっています: ${from} > ${to}`);
+  return {
+    label: `${from ?? "最初"} 〜 ${to ?? "最新"}`,
+    covers: (ep) => ep >= start && ep <= end,
+  };
+}
+
 export function analyze(
   results: Map<string, FileData>,
   gapMin: number,
   floorMin: number,
   ignore: Set<string>,
-  month?: string,
+  period: Period = ALL_PERIOD,
 ) {
   const gap = gapMin * 60_000;
   const floor = floorMin * 60_000;
-  const inMonth = month
-    ? (ep: number) => {
-        const d = new Date(ep);
-        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}` === month;
-      }
-    : () => true;
+  const inPeriod = period.covers;
 
   const projNames: string[] = [];
   const projIndex = new Map<string, number>();
@@ -420,7 +457,7 @@ export function analyze(
     const name = projectName(data.project, path);
     if (ignore.has(name)) {
       for (const [ep] of data.events)
-        if (ep >= MIN_EPOCH_MS && ep <= maxEpoch && inMonth(ep)) allEvents.push([ep, false, -1]);
+        if (ep >= MIN_EPOCH_MS && ep <= maxEpoch && inPeriod(ep)) allEvents.push([ep, false, -1]);
       continue;
     }
     const pid = pidOf(name);
@@ -429,7 +466,7 @@ export function analyze(
     totals.prompt += data.nPrompt;
     for (const s of data.sessions) allSessions.add(s);
     for (const [ep, isPrompt] of data.events)
-      if (ep >= MIN_EPOCH_MS && ep <= maxEpoch && inMonth(ep)) allEvents.push([ep, isPrompt, pid]);
+      if (ep >= MIN_EPOCH_MS && ep <= maxEpoch && inPeriod(ep)) allEvents.push([ep, isPrompt, pid]);
   }
   allEvents.sort((a, b) => a[0] - b[0]);
 
@@ -784,6 +821,8 @@ async function main() {
       ignore: { type: "string", multiple: true },
       json: { type: "string" },
       month: { type: "string" },
+      from: { type: "string" },
+      to: { type: "string" },
       source: { type: "string" },
       "codex-mode": { type: "string" }, // interactive(既定) | all
       help: { type: "boolean", default: false },
@@ -796,7 +835,8 @@ async function main() {
       `cc-worklog — Claude Code / Codex / Antigravity 稼働時間・タイムライン分析\n\n` +
         `使い方: cc-worklog [--open] [--gap 15] [--floor 2] [--out dashboard.html]\n` +
         `        [--source claude,codex,antigravity] [--codex-mode interactive|all]\n` +
-        `        [--ignore name1,name2] [--month YYYY-MM] [--json metrics.json] [--rebuild] [--no-cache]\n`,
+        `        [--ignore name1,name2] [--month YYYY-MM | --from YYYY-MM-DD --to YYYY-MM-DD]\n` +
+        `        [--json metrics.json] [--rebuild] [--no-cache]\n`,
     );
     return;
   }
@@ -804,6 +844,12 @@ async function main() {
   const gap = Number(values.gap);
   const floor = Number(values.floor);
   const month = values.month as string | undefined;
+  const from = values.from as string | undefined;
+  const to = values.to as string | undefined;
+  if (month && (from || to)) {
+    throw new Error("--month と --from/--to は同時に指定できません");
+  }
+  const period = month ? monthPeriod(month) : from || to ? rangePeriod(from, to) : ALL_PERIOD;
   const ignore = loadIgnore(values.ignore as string[] | undefined);
   if (ignore.size) console.error(`[ccw] 除外プロジェクト: ${[...ignore].sort().join(", ")}`);
 
@@ -822,9 +868,9 @@ async function main() {
     console.error(
       `[ccw] codex: ${codexInteractiveOnly ? "対話のみ(codex_exec等の自動実行を除外)" : "全て"}`,
     );
-  if (month) console.error(`[ccw] 対象月: ${month}`);
+  if (period !== ALL_PERIOD) console.error(`[ccw] 対象期間: ${period.label}`);
   const results = await loadAll(sources, !values["no-cache"], values.rebuild, codexInteractiveOnly);
-  const metrics = analyze(results, gap, floor, ignore, month);
+  const metrics = analyze(results, gap, floor, ignore, period);
 
   const outPath = values.out!;
   await Bun.write(outPath, renderHtml(metrics));

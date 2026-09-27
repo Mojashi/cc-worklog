@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { analyze, type FileData } from "../src/index.ts";
+import { analyze, type FileData, monthPeriod } from "../src/index.ts";
 
 const minute = 60_000;
 const base = new Date(2026, 7, 10, 12, 0, 0).getTime();
@@ -25,7 +25,7 @@ describe("project time apportionment", () => {
       15,
       2,
       new Set(),
-      "2026-08",
+      monthPeriod("2026-08"),
     );
 
     const projects = Object.fromEntries(
@@ -53,7 +53,7 @@ describe("project time apportionment", () => {
       15,
       2,
       new Set(["project-b"]),
-      "2026-08",
+      monthPeriod("2026-08"),
     );
 
     expect(metrics.projects).toHaveLength(1);
