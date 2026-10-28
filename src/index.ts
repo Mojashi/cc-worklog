@@ -17,11 +17,13 @@ import timelineTpl from "./timeline.html.txt" with { type: "text" };
 const PROJECTS_DIR = join(homedir(), ".claude", "projects");
 const CODEX_DIR = join(homedir(), ".codex", "sessions");
 const ANTIGRAVITY_HISTORY = join(homedir(), ".gemini", "antigravity-cli", "history.jsonl");
+const KIMI_DIR = join(homedir(), ".kimi-code", "sessions");
+const KIMI_WORKSPACES = join(homedir(), ".kimi-code", "workspaces.json");
 const CACHE_DIR = join(homedir(), ".cache", "cc-worklog");
-const CACHE_VERSION = 5;
+const CACHE_VERSION = 6;
 const MIN_EPOCH_MS = 1700000000000; // 2023-11 頃
 const MAX_EPOCH_SLACK_MS = 2 * 86400 * 1000;
-const ALL_SOURCES = ["claude", "codex", "antigravity"] as const;
+const ALL_SOURCES = ["claude", "codex", "antigravity", "kimi"] as const;
 
 export type FileData = {
   project: string | null;
@@ -36,6 +38,40 @@ export type FileData = {
 // codex の自動/非対話実行(手作業でない稼働)を判定する originator パターン。
 const CODEX_AUTOMATED_RE = /exec|harness|swarm|agent|bot|batch|\bci\b/i;
 
+/**
+ * 稼働をどのイベントから判定するか。
+ * - "prompt": 人間が打った発言だけで判定する。AIが走っている間の放置を稼働にしない。
+ * - "event": AI応答・ツール実行を含む全イベントで判定する(従来方式)。
+ */
+export type Basis = "prompt" | "event";
+
+// 人間が打っていない、システム/エージェントが注入した user ロールのメッセージの先頭。
+const SYNTHETIC_PROMPT_PREFIXES = [
+  "<task-notification", // バックグラウンドタスクの完了通知
+  "<local-command-caveat", // ローカルコマンド出力の注釈
+  "<local-command-stdout",
+  "<local-command-stderr",
+  "<system-reminder",
+  "<environment_context", // Codex: 環境コンテキストの自動注入
+  "<recommended_plugins",
+  "<turn_aborted",
+  "<codex_internal_context", // Codex: goal 継続などの内部注入
+  "<user_shell_command",
+  "<user_instructions",
+  "<image ", // 画像添付のプレースホルダ(本文は別パートに入る)
+  "# AGENTS.md instructions", // Codex: AGENTS.md の自動注入
+];
+
+export function isSyntheticPrompt(text: string): boolean {
+  const t = text.trimStart();
+  return SYNTHETIC_PROMPT_PREFIXES.some((prefix) => t.startsWith(prefix));
+}
+
+/** テキストパート群のうち、人間が打った本文が1つでもあるか。 */
+function hasHumanText(parts: string[]): boolean {
+  return parts.some((t) => t.trim().length > 0 && !isSyntheticPrompt(t));
+}
+
 // --------------------------------------------------------------------------- //
 // パース
 // --------------------------------------------------------------------------- //
@@ -44,7 +80,7 @@ function isoToEpoch(t: string): number | null {
   return Number.isNaN(ms) ? null : ms;
 }
 
-async function parseFile(path: string): Promise<FileData> {
+export async function parseFile(path: string): Promise<FileData> {
   let project: string | null = null;
   const events: [number, boolean][] = [];
   let nAssistant = 0,
@@ -76,11 +112,19 @@ async function parseFile(path: string): Promise<FileData> {
       nAssistant++;
     } else {
       nUser++;
-      if (!d.isSidechain) {
+      if (!d.isSidechain && !d.isMeta && !d.isCompactSummary) {
         const c = d.message?.content;
-        if (typeof c === "string") isPrompt = c.trim().length > 0;
-        else if (Array.isArray(c))
-          isPrompt = !c.some((x: any) => x && typeof x === "object" && x.type === "tool_result");
+        if (typeof c === "string") isPrompt = hasHumanText([c]);
+        else if (
+          Array.isArray(c) &&
+          !c.some((x: any) => x && typeof x === "object" && x.type === "tool_result")
+        ) {
+          const texts = c
+            .filter((x: any) => x && x.type === "text" && typeof x.text === "string")
+            .map((x: any) => x.text as string);
+          // 本文が無い(画像だけの)発言も人間の入力として数える
+          isPrompt = texts.length === 0 || hasHumanText(texts);
+        }
       }
       if (isPrompt) nPrompt++;
     }
@@ -92,7 +136,7 @@ async function parseFile(path: string): Promise<FileData> {
 
 // Codex CLI のセッションログ (~/.codex/sessions/**/*.jsonl)。
 // 各行に top-level timestamp、session_meta.payload.cwd に作業ディレクトリ。
-async function parseCodexFile(path: string): Promise<FileData> {
+export async function parseCodexFile(path: string): Promise<FileData> {
   let project: string | null = null;
   let originator: string | undefined;
   const events: [number, boolean][] = [];
@@ -131,14 +175,99 @@ async function parseCodexFile(path: string): Promise<FileData> {
       if (role === "assistant") nAssistant++;
       else if (role === "user") {
         nUser++;
-        isPrompt = true;
-        nPrompt++;
+        const parts = (Array.isArray(d.payload.content) ? d.payload.content : [])
+          .filter((x: any) => x && typeof x.text === "string")
+          .map((x: any) => x.text as string);
+        // AGENTS.md や環境コンテキストの自動注入は人間の発言ではない
+        if (hasHumanText(parts)) {
+          isPrompt = true;
+          nPrompt++;
+        }
       }
     }
     events.push([ep, isPrompt]);
   }
   events.sort((a, b) => a[0] - b[0]);
   return { project, events, nAssistant, nUser, nPrompt, sessions: [...sessions], originator };
+}
+
+// kimi-code は作業ディレクトリを workspaceId でしか持たないので、
+// ~/.kimi-code/workspaces.json の workspaceId -> root を引いて実パスに戻す。
+let kimiWorkspaceRoots: Map<string, string> | null = null;
+function kimiRootOf(workspaceId: string): string | null {
+  if (kimiWorkspaceRoots === null) {
+    kimiWorkspaceRoots = new Map();
+    if (existsSync(KIMI_WORKSPACES)) {
+      // 置いてあるのに読めない/壊れているなら、案件が全部 workspaceId のまま
+      // 出てしまうので黙って続行しない。
+      let parsed: any;
+      try {
+        parsed = JSON.parse(readFileSync(KIMI_WORKSPACES, "utf8"));
+      } catch (error) {
+        throw new Error(
+          `kimi の workspaces.json を読めません: ${KIMI_WORKSPACES}: ${(error as Error).message}`,
+        );
+      }
+      for (const [id, ws] of Object.entries<any>(parsed?.workspaces ?? {}))
+        if (ws?.root) kimiWorkspaceRoots.set(id, String(ws.root));
+    }
+  }
+  return kimiWorkspaceRoots.get(workspaceId) ?? null;
+}
+
+// sessions/<workspaceId>/session_<uuid>/agents/<agent>/wire.jsonl
+function kimiWorkspaceIdFromPath(path: string): string | null {
+  const rest = path.startsWith(KIMI_DIR) ? path.slice(KIMI_DIR.length).replace(/^\/+/, "") : "";
+  const id = rest.split("/")[0];
+  return id && id.startsWith("wd_") ? id : null;
+}
+
+export async function parseKimiFile(path: string): Promise<FileData> {
+  const workspaceId = kimiWorkspaceIdFromPath(path);
+  let project: string | null = workspaceId ? (kimiRootOf(workspaceId) ?? workspaceId) : null;
+  const events: [number, boolean][] = [];
+  let nAssistant = 0,
+    nUser = 0,
+    nPrompt = 0;
+  const sessions = new Set<string>();
+  let text: string;
+  try {
+    text = await Bun.file(path).text();
+  } catch {
+    return { project, events, nAssistant, nUser, nPrompt, sessions: [] };
+  }
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    let d: any;
+    try {
+      d = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    // metadata 行だけ created_at、他は time。どちらも epoch ms。
+    const ep =
+      typeof d.time === "number" ? d.time : typeof d.created_at === "number" ? d.created_at : null;
+    if (ep === null) continue;
+    const typ = d.type as string | undefined;
+    if (typ === "runtime.set_binding" && d.workspaceId) {
+      const root = kimiRootOf(String(d.workspaceId));
+      if (root) project = root;
+      continue;
+    }
+    if (typ === "metadata") continue;
+    // turn.prompt = 人間がターンを開始した合図。
+    const isPrompt = typ === "turn.prompt";
+    if (isPrompt) {
+      nPrompt++;
+      nUser++;
+    } else if (typ === "agent.message.appended") {
+      nAssistant++;
+    }
+    events.push([ep, isPrompt]);
+  }
+  if (workspaceId) sessions.add(workspaceId);
+  events.sort((a, b) => a[0] - b[0]);
+  return { project, events, nAssistant, nUser, nPrompt, sessions: [...sessions] };
 }
 
 // --------------------------------------------------------------------------- //
@@ -309,6 +438,10 @@ async function loadAll(
     const n = await loadAntigravity(useCache, rebuild, results);
     if (n) parts.push(`antigravity ${n}ワークスペース`);
   }
+  if (sources.has("kimi") && existsSync(KIMI_DIR)) {
+    const r = await loadJsonlDir(KIMI_DIR, parseKimiFile, useCache, rebuild, results);
+    parts.push(`kimi ${r.files}件`);
+  }
 
   if (!results.size) {
     console.error(`ログが見つかりません (sources: ${[...sources].join(",")})`);
@@ -456,10 +589,13 @@ export function analyze(
   floorMin: number,
   ignore: Set<string>,
   period: Period = ALL_PERIOD,
+  basis: Basis = "prompt",
 ) {
   const gap = gapMin * 60_000;
   const floor = floorMin * 60_000;
   const inPeriod = period.covers;
+  // basis=prompt のときは人間の発言だけが稼働判定の材料になる(AI応答・ツール実行は無視)。
+  const counts = (isPrompt: boolean) => basis === "event" || isPrompt;
 
   const projNames: string[] = [];
   const projIndex = new Map<string, number>();
@@ -482,8 +618,9 @@ export function analyze(
     if (!data.events.length) continue;
     const name = projectName(data.project, path);
     if (ignore.has(name)) {
-      for (const [ep] of data.events)
-        if (ep >= MIN_EPOCH_MS && ep <= maxEpoch && inPeriod(ep)) allEvents.push([ep, false, -1]);
+      for (const [ep, isPrompt] of data.events)
+        if (counts(isPrompt) && ep >= MIN_EPOCH_MS && ep <= maxEpoch && inPeriod(ep))
+          allEvents.push([ep, false, -1]);
       continue;
     }
     const pid = pidOf(name);
@@ -492,7 +629,8 @@ export function analyze(
     totals.prompt += data.nPrompt;
     for (const s of data.sessions) allSessions.add(s);
     for (const [ep, isPrompt] of data.events)
-      if (ep >= MIN_EPOCH_MS && ep <= maxEpoch && inPeriod(ep)) allEvents.push([ep, isPrompt, pid]);
+      if (counts(isPrompt) && ep >= MIN_EPOCH_MS && ep <= maxEpoch && inPeriod(ep))
+        allEvents.push([ep, isPrompt, pid]);
   }
   allEvents.sort((a, b) => a[0] - b[0]);
 
@@ -782,6 +920,7 @@ export function analyze(
     tz: Intl.DateTimeFormat().resolvedOptions().timeZone || "local",
     gapMin,
     floorMin,
+    basis,
     summary,
     daily: dailyList,
     rhythm: rhythm.map((row) => row.map((s) => round(s / 3.6e6, 3))),
@@ -806,7 +945,7 @@ export function renderHtml(m: any): string {
   return injectAll(dashboardTpl, "/*__DATA__*/", JSON.stringify(m));
 }
 export function renderTimeline(m: any): string {
-  const meta = { generatedAt: m.generatedAt, tz: m.tz, gapMin: m.gapMin };
+  const meta = { generatedAt: m.generatedAt, tz: m.tz, gapMin: m.gapMin, basis: m.basis };
   let s = injectAll(timelineTpl, "/*__DATA__*/", JSON.stringify(m.timeline));
   s = injectAll(s, "/*__META__*/", JSON.stringify(meta));
   return s;
@@ -814,11 +953,12 @@ export function renderTimeline(m: any): string {
 
 function printSummary(m: any) {
   const s = m.summary;
+  const basisLabel = m.basis === "event" ? "全イベント基準" : "ユーザー発言基準";
   const fix = (v: number) => v.toFixed(1).padStart(7);
   console.log();
   console.log(`  期間            : ${s.firstDate} 〜 ${s.lastDate}  (tz=${m.tz})`);
   console.log(
-    `  総アクティブ時間: ${s.activeHours} h  (gap=${m.gapMin}分 / floor=${m.floorMin}分)`,
+    `  総アクティブ時間: ${s.activeHours} h  (${basisLabel} gap=${m.gapMin}分 / floor=${m.floorMin}分)`,
   );
   console.log(`  稼働日数        : ${s.daysActive} 日  /  平均 ${s.avgPerDay} h/日`);
   if (s.maxDay) console.log(`  最長の日        : ${s.maxDay.date}  (${s.maxDay.hours} h)`);
@@ -840,6 +980,7 @@ async function main() {
     options: {
       gap: { type: "string", default: "15" },
       floor: { type: "string", default: "2" },
+      basis: { type: "string" }, // prompt(既定) | event
       out: { type: "string", default: "dashboard.html" },
       open: { type: "boolean", default: false },
       rebuild: { type: "boolean", default: false },
@@ -860,9 +1001,11 @@ async function main() {
     console.log(
       `cc-worklog — Claude Code / Codex / Antigravity 稼働時間・タイムライン分析\n\n` +
         `使い方: cc-worklog [--open] [--gap 15] [--floor 2] [--out dashboard.html]\n` +
-        `        [--source claude,codex,antigravity] [--codex-mode interactive|all]\n` +
+        `        [--basis prompt|event]\n` +
+        `        [--source claude,codex,antigravity,kimi] [--codex-mode interactive|all]\n` +
         `        [--ignore name1,name2] [--month YYYY-MM | --from YYYY-MM-DD --to YYYY-MM-DD]\n` +
         `        [--json metrics.json] [--rebuild] [--no-cache]\n\n` +
+        `稼働の基準: prompt(既定)=人間が打った発言の間隔だけで判定 / event=AI応答・ツール実行も含む全イベント\n\n` +
         `除外プロジェクトは --ignore と、次の 2 つのファイル(1行1名前, # でコメント)から読む:\n` +
         `  ${userIgnoreFile()}  (ユーザー設定。どこで実行しても効く)\n` +
         `  ./ctlignore.txt                        (実行したディレクトリ)\n`,
@@ -872,6 +1015,11 @@ async function main() {
 
   const gap = Number(values.gap);
   const floor = Number(values.floor);
+  const basisArg = (values.basis as string | undefined) ?? "prompt";
+  if (basisArg !== "prompt" && basisArg !== "event") {
+    throw new Error(`--basis は prompt か event を指定してください (指定値: ${basisArg})`);
+  }
+  const basis: Basis = basisArg;
   const month = values.month as string | undefined;
   const from = values.from as string | undefined;
   const to = values.to as string | undefined;
@@ -898,6 +1046,9 @@ async function main() {
       : ALL_SOURCES,
   );
   console.error(`[ccw] ソース: ${[...sources].join(", ")}`);
+  console.error(
+    `[ccw] 稼働の基準: ${basis === "prompt" ? "ユーザー発言(人間が打った発言の間隔)" : "全イベント(AI応答・ツール実行を含む)"}`,
+  );
   const codexInteractiveOnly = (values["codex-mode"] as string | undefined) !== "all";
   if (sources.has("codex"))
     console.error(
@@ -905,7 +1056,7 @@ async function main() {
     );
   if (period !== ALL_PERIOD) console.error(`[ccw] 対象期間: ${period.label}`);
   const results = await loadAll(sources, !values["no-cache"], values.rebuild, codexInteractiveOnly);
-  const metrics = analyze(results, gap, floor, ignore, period);
+  const metrics = analyze(results, gap, floor, ignore, period, basis);
 
   const outPath = values.out!;
   await Bun.write(outPath, renderHtml(metrics));

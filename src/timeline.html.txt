@@ -101,7 +101,7 @@ const tl=document.getElementById('tl'), canvas=document.getElementById('canvas')
 let pxh=10; // px / hour
 
 document.getElementById('sub').textContent=
-  `${DATA.lanes.length}プロジェクト / ${DATA.segments.length}セッション ・ tz=${META.tz} ・ gap=${META.gapMin}分`;
+  `${DATA.lanes.length}プロジェクト / ${DATA.segments.length}セッション ・ tz=${META.tz} ・ ${META.basis === "event" ? "全イベント" : "ユーザー発言"}基準 gap=${META.gapMin}分`;
 
 const color=p=>`hsl(${(p*53)%360} 60% 60%)`;
 const pad=n=>String(n).padStart(2,'0');

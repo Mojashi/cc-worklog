@@ -87,7 +87,7 @@ const fmtH = h => h>=1 ? h.toFixed(1)+'h' : Math.round(h*60)+'m';
 // meta + cards
 const s=DATA.summary;
 document.getElementById('meta').textContent =
-  `${s.firstDate} 〜 ${s.lastDate}  ・  生成 ${DATA.generatedAt}  ・  tz=${DATA.tz}  ・  gap=${DATA.gapMin}分 / floor=${DATA.floorMin}分`;
+  `${s.firstDate} 〜 ${s.lastDate}  ・  生成 ${DATA.generatedAt}  ・  tz=${DATA.tz}  ・  ${DATA.basis === "event" ? "全イベント" : "ユーザー発言"}基準 gap=${DATA.gapMin}分 / floor=${DATA.floorMin}分`;
 const cards=[
   ['総アクティブ時間', fmtH(s.activeHours), `${s.daysActive}日稼働`],
   ['平均 / 稼働日', fmtH(s.avgPerDay), s.maxDay?`最長 ${fmtH(s.maxDay.hours)} (${s.maxDay.date})`:''],
