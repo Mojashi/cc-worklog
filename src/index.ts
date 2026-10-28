@@ -842,6 +842,13 @@ export function analyze(
       localActive: round(projLocalActive[pid] / 3.6e6, 2),
     })),
     segments,
+    // 総稼働として実際にカウントされる作業ブロック(全案件まとめて gap 判定した区間)
+    workBlocks: blocks.map((b) => ({
+      s: b.rstart as number,
+      e: (b.rend as number) + floor,
+      d: Object.values(b.pids as Record<number, number>).reduce((sum, v) => sum + v, 0),
+      n: b.prompts as number,
+    })),
   };
 
   // daily 配列化
@@ -944,9 +951,32 @@ function injectAll(tpl: string, token: string, value: string): string {
 export function renderHtml(m: any): string {
   return injectAll(dashboardTpl, "/*__DATA__*/", JSON.stringify(m));
 }
-export function renderTimeline(m: any): string {
+// タイムラインの gap つまみで選べる値(分)
+export const GAP_CHOICES = [5, 10, 15, 20, 30, 45, 60];
+
+// つまみで切り替えられるよう、各 gap で集計し直したタイムラインを用意する
+export function timelinesByGap(
+  results: Map<string, FileData>,
+  gapMin: number,
+  floorMin: number,
+  ignore: Set<string>,
+  period: Period = ALL_PERIOD,
+  basis: Basis = "prompt",
+) {
+  const gaps = [...new Set([...GAP_CHOICES, gapMin])].sort((a, b) => a - b);
+  return gaps.map((g) => {
+    const m = g === gapMin ? null : analyze(results, g, floorMin, ignore, period, basis);
+    return { gapMin: g, m };
+  });
+}
+
+export function renderTimeline(m: any, byGap: { gapMin: number; m: any }[] = []): string {
   const meta = { generatedAt: m.generatedAt, tz: m.tz, gapMin: m.gapMin, basis: m.basis };
-  let s = injectAll(timelineTpl, "/*__DATA__*/", JSON.stringify(m.timeline));
+  const variants = (byGap.length ? byGap : [{ gapMin: m.gapMin, m: null }]).map((v) => {
+    const src = v.m ?? m;
+    return { gapMin: v.gapMin, activeHours: src.summary.activeHours, ...src.timeline };
+  });
+  let s = injectAll(timelineTpl, "/*__DATA__*/", JSON.stringify(variants));
   s = injectAll(s, "/*__META__*/", JSON.stringify(meta));
   return s;
 }
@@ -1063,7 +1093,8 @@ async function main() {
   console.error(`[ccw] HTML 出力: ${resolve(outPath)}`);
 
   const tlPath = join(dirname(resolve(outPath)), "timeline.html");
-  await Bun.write(tlPath, renderTimeline(metrics));
+  const byGap = timelinesByGap(results, gap, floor, ignore, period, basis);
+  await Bun.write(tlPath, renderTimeline(metrics, byGap));
   console.error(`[ccw] タイムライン出力: ${tlPath}`);
 
   if (values.json) {

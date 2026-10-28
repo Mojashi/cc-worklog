@@ -55,10 +55,28 @@ button:hover{border-color:var(--accent)}
 .lane.hidden,.srow.hidden{opacity:0;transform:translateY(12px);pointer-events:none}
 .bar{position:absolute;border-radius:4px;top:3px;height:calc(var(--rh) - 7px)}
 .bar:hover{outline:1.5px solid #fff;z-index:4}
+/* 労働カウント(総稼働に入る作業ブロック)の固定行 */
+#wrow{position:sticky;top:var(--axis);height:var(--rh);z-index:5;background:#11161ded;
+  border-bottom:1px solid var(--border)}
+.wbar{position:absolute;top:5px;height:calc(var(--rh) - 11px);border-radius:3px;
+  background:var(--accent);border:1px solid #f0a07f}
+.wbar:hover{outline:1.5px solid #fff;z-index:4}
+#sidework{position:absolute;left:0;right:0;top:var(--axis);height:var(--rh);z-index:2;background:#11161d;
+  border-bottom:1px solid var(--border);display:flex;flex-direction:column;justify-content:center;padding:0 12px}
+#sidework b{font-size:12px;color:var(--accent)}
+#sidework span{font-size:10px;color:var(--muted)}
 #tip{position:fixed;pointer-events:none;background:#000;border:1px solid var(--border);
   padding:6px 9px;border-radius:6px;font-size:12px;opacity:0;transition:opacity .1s;z-index:30;white-space:nowrap}
 .range{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--fg);
   background:#0d1117;border:1px solid var(--border);border-radius:6px;padding:4px 10px;white-space:nowrap}
+#range{cursor:pointer}
+#range:hover{border-color:var(--accent)}
+#rangeEdit{display:flex;align-items:center;gap:6px}
+#rangeEdit[hidden]{display:none}
+#rangeEdit input{background:var(--panel);color:var(--fg);border:1px solid var(--border);border-radius:6px;
+  padding:3px 6px;font-size:13px;color-scheme:dark}
+#gapR{width:110px;accent-color:var(--accent);vertical-align:middle}
+#gapV{font-variant-numeric:tabular-nums;color:var(--fg);display:inline-block;min-width:34px}
 #cursor{position:absolute;top:0;bottom:0;width:1px;background:rgba(255,255,255,.45);
   z-index:6;pointer-events:none;display:none}
 #curlabel{position:sticky;top:6px;transform:translateX(-50%);background:var(--accent);color:#fff;
@@ -70,9 +88,14 @@ button:hover{border-color:var(--accent)}
 <div class="top">
   <h1>並行作業タイムライン</h1>
   <a href="dashboard.html">← ダッシュボードへ</a>
-  <span class="range" id="range"></span>
+  <span class="range" id="range" title="クリックで表示期間を指定"></span>
+  <span class="range" id="rangeEdit" hidden><input type="date" id="rfrom"> 〜 <input type="date" id="rto">
+    <button id="rapply">表示</button></span>
   <span class="hint" id="sub"></span>
   <div class="ctrl">
+    <label class="hint" title="発言の間隔がこれを超えたら作業ブロックを区切る">gap
+      <input type="range" id="gapR" min="0" step="1"> <b id="gapV"></b></label>
+    <span class="hint">|</span>
     <span class="hint" id="vis"></span>
     <span class="hint">|</span>
     <span class="hint">ズーム</span>
@@ -82,26 +105,23 @@ button:hover{border-color:var(--accent)}
   </div>
 </div>
 <div id="grid">
-  <div id="side"><div id="sidecover">案件 / プロジェクト</div><div id="sideinner"></div></div>
-  <div id="tl"><div id="canvas"><div class="axis" id="axis"></div><div id="lanes"></div><div id="cursor"><div id="curlabel"></div></div></div></div>
+  <div id="side"><div id="sidecover">案件 / プロジェクト</div><div id="sidework" title="全案件まとめて gap 判定した作業ブロック。総アクティブ時間はこの帯の合計"><b>労働カウント</b><span id="wsum"></span></div><div id="sideinner"></div></div>
+  <div id="tl"><div id="canvas"><div class="axis" id="axis"></div><div id="wrow"></div><div id="lanes"></div><div id="cursor"><div id="curlabel"></div></div></div></div>
 </div>
 <div id="minimap"><div id="mmtrack"><div id="mmdens"></div><div id="mmview"></div></div></div>
 <div id="tip"></div>
 <script>
-const DATA=/*__DATA__*/, META=/*__META__*/;
+const VARIANTS=/*__DATA__*/, META=/*__META__*/;   // gap ごとに集計したタイムライン
 const HOUR=3600000, DAY=86400000;
-const T0=DATA.start, T1=DATA.end, SPAN=Math.max(T1-T0,HOUR);
+const T0=VARIANTS[0].start, T1=VARIANTS[0].end, SPAN=Math.max(T1-T0,HOUR);
 const LW=190, AXIS=32, ROWH=30;
 const r=document.documentElement.style;
 r.setProperty('--lw',LW+'px'); r.setProperty('--axis',AXIS+'px'); r.setProperty('--rh',ROWH+'px');
 const tl=document.getElementById('tl'), canvas=document.getElementById('canvas'),
       axis=document.getElementById('axis'), lanesEl=document.getElementById('lanes'),
       side=document.getElementById('side'), sideinner=document.getElementById('sideinner'),
-      tip=document.getElementById('tip');
+      wrow=document.getElementById('wrow'), tip=document.getElementById('tip');
 let pxh=10; // px / hour
-
-document.getElementById('sub').textContent=
-  `${DATA.lanes.length}プロジェクト / ${DATA.segments.length}セッション ・ tz=${META.tz} ・ ${META.basis === "event" ? "全イベント" : "ユーザー発言"}基準 gap=${META.gapMin}分`;
 
 const color=p=>`hsl(${(p*53)%360} 60% 60%)`;
 const pad=n=>String(n).padStart(2,'0');
@@ -111,33 +131,67 @@ const fmtDate=ms=>{const d=new Date(ms);
   return `${d.getFullYear()}/${pad(d.getMonth()+1)}/${pad(d.getDate())}(${'日月火水木金土'[d.getDay()]})`;};
 const fmtDur=ms=>{const m=Math.round(ms/60000);return m>=60?(m/60).toFixed(1)+'h':m+'m';};
 const X=ms=>(ms-T0)/HOUR*pxh;
+function showTip(e,html){ tip.innerHTML=html; tip.style.opacity=1;
+  tip.style.left=(e.clientX+12)+'px'; tip.style.top=(e.clientY+12)+'px'; }
+const hideTip=()=>tip.style.opacity=0;
 
-// プロジェクト別にセグメントをまとめる(開始順)
-const NP=DATA.lanes.length;
-const perPid=Array.from({length:NP},()=>[]);
-DATA.segments.forEach(s=>perPid[s.p].push(s));
-perPid.forEach(a=>a.sort((x,y)=>x.s-y.s));
+// 表示中の gap のデータと、そこから作った DOM
+let DATA, NP, perPid, laneEl, srowEl, WB, wbarEl;
 
-// レーン(案件ごと) と サイドバー行を一度だけ生成
-const laneEl=[], srowEl=[];
-const lanesFrag=document.createDocumentFragment(), sideFrag=document.createDocumentFragment();
-for(let p=0;p<NP;p++){
-  const lane=document.createElement('div'); lane.className='lane hidden';
-  for(const s of perPid[p]){
-    const b=document.createElement('div'); b.className='bar';
-    b.style.background=color(p); b._s=s; lane.appendChild(b);
-    b.addEventListener('mousemove',e=>{
-      tip.innerHTML=`<b>${DATA.lanes[p].name}</b><br>${fmtDT(s.s)} → ${fmtDT(s.e)}<br>稼働 ${fmtDur(s.e-s.s)} ・ ${s.n} prompts`;
-      tip.style.opacity=1;tip.style.left=(e.clientX+12)+'px';tip.style.top=(e.clientY+12)+'px';});
-    b.addEventListener('mouseleave',()=>tip.style.opacity=0);
+function loadVariant(v){
+  DATA=v; NP=DATA.lanes.length;
+  document.getElementById('sub').textContent=
+    `${NP}プロジェクト / ${DATA.segments.length}セッション ・ 総 ${DATA.activeHours}h ・ tz=${META.tz} ・ ${META.basis === "event" ? "全イベント" : "ユーザー発言"}基準`;
+  document.getElementById('gapV').textContent=`${DATA.gapMin}分`;
+
+  // プロジェクト別にセグメントをまとめる(開始順)
+  perPid=Array.from({length:NP},()=>[]);
+  DATA.segments.forEach(s=>perPid[s.p].push(s));
+  perPid.forEach(a=>a.sort((x,y)=>x.s-y.s));
+
+  // レーン(案件ごと) と サイドバー行
+  laneEl=[]; srowEl=[];
+  const lanesFrag=document.createDocumentFragment(), sideFrag=document.createDocumentFragment();
+  for(let p=0;p<NP;p++){
+    const lane=document.createElement('div'); lane.className='lane hidden';
+    for(const s of perPid[p]){
+      const b=document.createElement('div'); b.className='bar';
+      b.style.background=color(p); lane.appendChild(b);
+      b.addEventListener('mousemove',e=>showTip(e,
+        `<b>${DATA.lanes[p].name}</b><br>${fmtDT(s.s)} → ${fmtDT(s.e)}<br>稼働 ${fmtDur(s.e-s.s)} ・ ${s.n} prompts`));
+      b.addEventListener('mouseleave',hideTip);
+    }
+    lanesFrag.appendChild(lane); laneEl.push(lane);
+    const sr=document.createElement('div'); sr.className='srow hidden';
+    sr.innerHTML=`<b><span class="sw" style="background:${color(p)}"></span>${DATA.lanes[p].name}</b><span>按分 ${DATA.lanes[p].active}h</span>`;
+    sr.title=`案件内 ${DATA.lanes[p].localActive}h（並行案件との重複を含む）`;
+    sideFrag.appendChild(sr); srowEl.push(sr);
   }
-  lanesFrag.appendChild(lane); laneEl.push(lane);
-  const sr=document.createElement('div'); sr.className='srow hidden';
-  sr.innerHTML=`<b><span class="sw" style="background:${color(p)}"></span>${DATA.lanes[p].name}</b><span>按分 ${DATA.lanes[p].active}h</span>`;
-  sr.title=`案件内 ${DATA.lanes[p].localActive}h（並行案件との重複を含む）`;
-  sideFrag.appendChild(sr); srowEl.push(sr);
+  lanesEl.replaceChildren(lanesFrag); sideinner.replaceChildren(sideFrag);
+
+  // 労働カウント行(作業ブロックごと)
+  WB=DATA.workBlocks; wbarEl=[];
+  const wFrag=document.createDocumentFragment();
+  for(const w of WB){
+    const b=document.createElement('div'); b.className='wbar';
+    b.addEventListener('mousemove',e=>showTip(e,
+      `<b>労働カウント ${fmtDur(w.d)}</b><br>${fmtDT(w.s)} → ${fmtDT(w.e)}<br>${w.n} prompts`));
+    b.addEventListener('mouseleave',hideTip);
+    wFrag.appendChild(b); wbarEl.push(b);
+  }
+  wrow.replaceChildren(wFrag);
 }
-lanesEl.appendChild(lanesFrag); sideinner.appendChild(sideFrag);
+
+// gap つまみ: 表示位置とズームは保ったままデータだけ差し替える
+const gapR=document.getElementById('gapR');
+gapR.max=VARIANTS.length-1;
+gapR.value=Math.max(0,VARIANTS.findIndex(v=>v.gapMin===META.gapMin));
+gapR.addEventListener('input',()=>{
+  const sl=tl.scrollLeft;
+  loadVariant(VARIANTS[gapR.value]); placeBars(); buildMinimap();
+  tl.scrollLeft=sl; updateView();
+});
+loadVariant(VARIANTS[gapR.value]);
 
 function placeBars(){       // ズーム時にバーの左/幅を再計算
   canvas.style.width=(X(T1)+40)+'px';
@@ -150,7 +204,17 @@ function placeBars(){       // ズーム時にバーの左/幅を再計算
       b.style.opacity=0.5+Math.min(s.n,30)/30*0.5;
     }
   }
+  WB.forEach((w,i)=>{
+    wbarEl[i].style.left=X(w.s)+'px'; wbarEl[i].style.width=Math.max(X(w.e)-X(w.s),2)+'px';
+  });
+  wrow.style.width=canvas.style.width;
   buildAxis();
+}
+// 画面内に入っている労働カウント(ブロックが見切れる場合は表示範囲の割合で按分)
+function countedIn(vs,ve){
+  let ms=0; for(const w of WB){ if(w.s>ve) break;
+    const ov=Math.min(w.e,ve)-Math.max(w.s,vs); if(ov>0) ms+=w.d*ov/Math.max(w.e-w.s,1); }
+  return ms;
 }
 function buildAxis(){
   // 日付ラベルは(不透明な)軸バーの中に入れて常に見えるようにする。グリッド線は本体側。
@@ -193,7 +257,7 @@ function updateView(){
   let idx=0;
   for(let p=0;p<NP;p++){
     if(perPid[p].length && hasInView(perPid[p],vs,ve)){
-      const top=AXIS+idx*ROWH;
+      const top=AXIS+ROWH+idx*ROWH;
       const lane=laneEl[p], sr=srowEl[p];
       lane.style.top=top+'px'; lane.classList.remove('hidden');
       sr.style.top=top+'px'; sr.classList.remove('hidden');
@@ -202,12 +266,13 @@ function updateView(){
       laneEl[p].classList.add('hidden'); srowEl[p].classList.add('hidden');
     }
   }
-  const h=AXIS+idx*ROWH+8;
+  const h=AXIS+ROWH+idx*ROWH+8;
   canvas.style.height=Math.max(h, tl.clientHeight)+'px';
   sideinner.style.height=h+'px';
   document.getElementById('vis').textContent=`画面内 ${idx} 案件`;
   const vt0=T0+sl/pxh*HOUR, vt1=T0+(sl+vw)/pxh*HOUR;
-  document.getElementById('range').textContent=`${fmtDate(vt0)} 〜 ${fmtDate(vt1)}`;
+  document.getElementById('wsum').textContent=`画面内 ${fmtDur(countedIn(vs,ve))}`;
+  document.getElementById('range').textContent=`${fmtDate(vt0+HOUR/pxh)} 〜 ${fmtDate(vt1-HOUR/pxh)}`;
   mmUpdate();
 }
 
@@ -226,6 +291,35 @@ document.getElementById('zin').onclick=()=>zoom(1.6);
 document.getElementById('zout').onclick=()=>zoom(1/1.6);
 document.getElementById('jstart').onclick=()=>tl.scrollLeft=0;
 document.getElementById('jend').onclick=()=>tl.scrollLeft=canvas.scrollWidth;
+// 上部の期間表示をクリック → 日付を指定して、その期間がちょうど画面に収まるよう表示
+const rangeEl=document.getElementById('range'), rangeEdit=document.getElementById('rangeEdit'),
+      rfrom=document.getElementById('rfrom'), rto=document.getElementById('rto');
+const isoDate=ms=>{const d=new Date(ms);return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;};
+const parseDate=v=>{const [y,m,d]=v.split('-').map(Number);return new Date(y,m-1,d).getTime();};
+function openRangeEdit(){
+  const vt0=T0+tl.scrollLeft/pxh*HOUR, vt1=T0+(tl.scrollLeft+tl.clientWidth)/pxh*HOUR;
+  rfrom.value=isoDate(vt0+HOUR/pxh); rto.value=isoDate(vt1-HOUR/pxh);   // 1px ぶん内側で判定(丸めで隣の日にずれないように)
+  rfrom.min=rto.min=isoDate(T0); rfrom.max=rto.max=isoDate(T1);
+  rangeEl.hidden=true; rangeEdit.hidden=false; rfrom.focus();
+}
+function closeRangeEdit(){ rangeEdit.hidden=true; rangeEl.hidden=false; }
+function showRange(t0,t1){
+  pxh=Math.min(160,Math.max(0.4,tl.clientWidth/((t1-t0)/HOUR)));
+  placeBars(); updateView();
+  tl.scrollLeft=X(t0);
+}
+function applyRangeEdit(){
+  if(!rfrom.value||!rto.value) return;
+  const t0=parseDate(rfrom.value), t1=parseDate(rto.value)+DAY;   // 終了日はその日いっぱいまで含める
+  if(t1<=t0) return;
+  closeRangeEdit(); showRange(t0,t1);
+}
+rangeEl.onclick=openRangeEdit;
+document.getElementById('rapply').onclick=applyRangeEdit;
+rangeEdit.addEventListener('keydown',e=>{
+  if(e.key==='Enter') applyRangeEdit(); else if(e.key==='Escape') closeRangeEdit();
+});
+document.addEventListener('mousedown',e=>{ if(!rangeEdit.hidden && !rangeEdit.contains(e.target)) closeRangeEdit(); });
 // Ctrl/⌘+ホイールのみズーム。通常スクロールはブラウザ任せ(縦=縦/横=横、奪わない)
 tl.addEventListener('wheel',e=>{
   if(e.ctrlKey||e.metaKey){ e.preventDefault(); zoom(e.deltaY<0?1.12:1/1.12); }

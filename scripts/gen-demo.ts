@@ -4,7 +4,7 @@
  * 実データ(~/.claude)は一切使わない。README のスクショ用。
  * 使い方: bun run scripts/gen-demo.ts <outDir>
  */
-import { analyze, renderHtml, renderTimeline, type FileData } from "../src/index.ts";
+import { analyze, renderHtml, renderTimeline, timelinesByGap, type FileData } from "../src/index.ts";
 import { join } from "node:path";
 
 // 決定論的な擬似乱数(seed)
@@ -70,5 +70,8 @@ for (const [name, events] of byProject) {
 const metrics = analyze(results, 15, 2, new Set());
 const outDir = Bun.argv[2] || ".";
 await Bun.write(join(outDir, "demo-dashboard.html"), renderHtml(metrics));
-await Bun.write(join(outDir, "demo-timeline.html"), renderTimeline(metrics));
+await Bun.write(
+  join(outDir, "demo-timeline.html"),
+  renderTimeline(metrics, timelinesByGap(results, 15, 2, new Set())),
+);
 console.log(`wrote demo HTML to ${outDir} (active ${metrics.summary.activeHours}h, ${metrics.projects.length} projects)`);
