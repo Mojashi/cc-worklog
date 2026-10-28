@@ -1,6 +1,6 @@
 # cc-worklog
 
-**Claude Code / Codex / Antigravity** の稼働時間 / タイムラインを分析するツール（**依存ゼロ・完全ローカル・Bun 単一バイナリ**）。
+**Claude Code / Codex / Antigravity / kimi-code** の稼働時間 / タイムラインを分析するツール（**依存ゼロ・完全ローカル・Bun 単一バイナリ**）。
 複数の AI コーディングツールのセッションログを横断し、**アクティブ時間**（実際に手を動かしていた時間）を
 ギャップベースで推定して、自己完結の **HTML ダッシュボード** と **並行作業タイムライン** を生成する。
 
@@ -13,6 +13,7 @@
 | `claude` | `~/.claude/projects/**/*.jsonl` | Claude Code。user/assistant イベント |
 | `codex` | `~/.codex/sessions/**/*.jsonl` | Codex CLI。`session_meta.cwd` で案件判定、event_msg/response_item をイベント化 |
 | `antigravity` | `~/.gemini/antigravity-cli/history.jsonl` | Antigravity。ユーザープロンプト（`workspace` で案件判定） |
+| `kimi` | `~/.kimi-code/sessions/**/wire.jsonl` | kimi-code。`turn.prompt` を人間の発言として拾い、`workspaces.json` で workspaceId を実パスに戻して案件判定 |
 
 各ソースの `cwd`/`workspace` を git ロールアップで同じ案件名に集約するので、
 **同一リポジトリを Claude・Codex・Antigravity のどれで触っても 1 つの案件に合流**する。
