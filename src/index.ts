@@ -1008,7 +1008,7 @@ async function main() {
   const { values } = parseArgs({
     args: Bun.argv.slice(2),
     options: {
-      gap: { type: "string", default: "15" },
+      gap: { type: "string", default: "20" },
       floor: { type: "string", default: "2" },
       basis: { type: "string" }, // prompt(既定) | event
       out: { type: "string", default: "dashboard.html" },
@@ -1030,7 +1030,7 @@ async function main() {
   if (values.help) {
     console.log(
       `cc-worklog — Claude Code / Codex / Antigravity / kimi-code 稼働時間・タイムライン分析\n\n` +
-        `使い方: cc-worklog [--open] [--gap 15] [--floor 2] [--out dashboard.html]\n` +
+        `使い方: cc-worklog [--open] [--gap 20] [--floor 2] [--out dashboard.html]\n` +
         `        [--basis prompt|event]\n` +
         `        [--source claude,codex,antigravity,kimi] [--codex-mode interactive|all]\n` +
         `        [--ignore name1,name2] [--month YYYY-MM | --from YYYY-MM-DD --to YYYY-MM-DD]\n` +
