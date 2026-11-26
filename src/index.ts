@@ -7,7 +7,7 @@
  */
 import { statSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, dirname, basename, resolve } from "node:path";
+import { join, dirname, basename, resolve, isAbsolute } from "node:path";
 import { parseArgs } from "node:util";
 
 // テンプレートはバイナリに埋め込む(text import)
@@ -457,6 +457,12 @@ async function loadAll(
 const repoCache = new Map<string, string | null>();
 function repoRoot(cwd: string): string | null {
   if (repoCache.has(cwd)) return repoCache.get(cwd)!;
+  // 相対パス(kimi の workspaces.json に無い workspaceId など)は実行した場所で解釈されてしまううえ、
+  // dirname(".") === "." なので下のループが終わらない。リポジトリ判定の対象にしない。
+  if (!isAbsolute(cwd)) {
+    repoCache.set(cwd, null);
+    return null;
+  }
   let root: string | null = null;
   let d = cwd.replace(/\/+$/, "");
   const seen: string[] = [];
